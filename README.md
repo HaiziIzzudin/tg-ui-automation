@@ -7,7 +7,7 @@ A specialized Windows Python utility that ensures Telegram and a target secondar
 - **Window Management**: Resizes Telegram and performs a sequence of clicks at specific relative coordinates.
 - **Secondary Window Control**: Targets a second window (variable title) to move and resize it.
 - **Persistent Monitoring**: Continuously checks if Telegram is running and restarts the setup sequence if it crashes or closes.
-- **Advanced Error Recovery**: If the secondary window is not found, the script automatically restarts Telegram and retries after a 60-second delay.
+- **Advanced Error Recovery**: If the secondary window is not found, the script automatically restarts Telegram and retries after a 30-second delay.
 - **Secure Configuration**: Uses a `.env` file for sensitive window titles.
 
 ## Prerequisites
