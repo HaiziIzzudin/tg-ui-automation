@@ -10,6 +10,5 @@ __pycache__/
 telegram_monitor.log
 
 # Other
-SetResolution.exe
 SetResolution.xml
 scr_res_implement.py
