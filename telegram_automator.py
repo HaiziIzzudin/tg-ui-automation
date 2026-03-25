@@ -21,7 +21,7 @@ TELEGRAM_TITLE = "Telegram"
 # Title of the secondary window (fetched from .env or fallback)
 SECOND_WINDOW_TITLE = os.getenv("SECOND_WINDOW_TITLE", "secondWindowTitle") 
 
-MONITOR_INTERVAL = 3.0      # Seconds to wait between process checks
+MONITOR_INTERVAL = 5.0      # Seconds to wait between process checks
 LAUNCH_TIMEOUT = 7.0        # Seconds to wait for Telegram to launch
 ACTION_DELAY = 0.5          # Seconds to wait between window actions (resize/click)
 
