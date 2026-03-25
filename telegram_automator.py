@@ -5,6 +5,7 @@ import logging
 import pyautogui
 import pygetwindow as gw
 import psutil
+import ctypes
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -25,7 +26,7 @@ LAUNCH_TIMEOUT = 7.0        # Seconds to wait for Telegram to launch
 ACTION_DELAY = 0.5          # Seconds to wait between window actions (resize/click)
 
 TELEGRAM_SIZE = (800, 600)
-SECOND_WINDOW_SIZE = (1243, 1039)
+SECOND_WINDOW_SIZE = (1280, 1032)
 SECOND_WINDOW_POS = (0, 0)
 
 CLICK_COORDS = [
@@ -179,6 +180,25 @@ def setup_second_window() -> bool:
         logger.error(f"Error adjusting secondary window: {e}")
         return False
 
+def ensure_correct_resolution():
+    """Check if current resolution is 1920x1080, if not, fix it."""
+    user32 = ctypes.windll.user32
+    width = user32.GetSystemMetrics(0)
+    height = user32.GetSystemMetrics(1)
+
+    if width != 1920 or height != 1080:
+        logger.warning(f"Resolution mismatch detected: {width}x{height}. Expected 1920x1080. Fixing...")
+        try:
+            exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SetResolution.exe")
+            subprocess.run(['powershell', f'& "{exe_path}" 1080 -noprompt'], check=True)
+            logger.info("Resolution change command sent.")
+            # Wait a bit for the resolution change to take effect
+            time.sleep(2)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to change resolution: {e}")
+    else:
+        logger.debug("Screen resolution is correct (1920x1080).")
+
 # ==============================================================================
 # MAIN LOOP
 # ==============================================================================
@@ -188,6 +208,9 @@ def main():
     
     while True:
         try:
+            # Always ensure resolution is correct first
+            ensure_correct_resolution()
+            
             telegram_running = is_telegram_running()
             
             if not telegram_running:
