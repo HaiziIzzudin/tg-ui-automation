@@ -2,3 +2,5 @@ pyautogui
 pygetwindow
 psutil
 python-dotenv
+fastapi
+uvicorn[standard]

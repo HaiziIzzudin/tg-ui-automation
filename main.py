@@ -6,7 +6,9 @@ import pyautogui
 import pygetwindow as gw
 import psutil
 import ctypes
+import threading
 from dotenv import load_dotenv
+import grid_server
 
 # Load environment variables from .env file
 load_dotenv()
@@ -205,6 +207,11 @@ def ensure_correct_resolution():
 
 def main():
     logger.info("Starting Telegram Monitor Service...")
+    
+    # Start Grid Interaction Server in a background thread
+    logger.info("Launching Grid Interaction Server (FastAPI) thread...")
+    api_thread = threading.Thread(target=grid_server.run_server, daemon=True)
+    api_thread.start()
     
     while True:
         try:
