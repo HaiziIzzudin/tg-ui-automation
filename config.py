@@ -84,19 +84,7 @@ def parse_maximized(value: str, default: Tuple[int, int]) -> Optional[Tuple[int,
     return parse_resolution(value, default)
 
 
-def parse_bool(value: str, default: bool) -> bool:
-    """Parse a boolean string; returns True for 'true', 'yes', '1', False for 'false', 'no', '0'."""
-    try:
-        v = value.strip().lower()
-        if v in ("true", "yes", "1"):
-            return True
-        elif v in ("false", "no", "0"):
-            return False
-        else:
-            raise ValueError(f"Invalid boolean: '{value}'")
-    except (ValueError, AttributeError) as e:
-        logger.warning(f"Invalid boolean '{value}': {e}. Using default {default}.")
-        return default
+
 
 
 class Config:

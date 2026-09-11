@@ -12,7 +12,6 @@ from config import (
     parse_click_points,
     parse_int,
     parse_maximized,
-    parse_bool,
     Config,
     clamp_rotation,
 )
@@ -101,19 +100,6 @@ class TestParseMaximized:
         assert parse_maximized("MAXIMIZED", (100, 100)) is None
 
 
-class TestParseBool:
-    def test_true_variants(self):
-        assert parse_bool("true", False) is True
-        assert parse_bool("yes", False) is True
-        assert parse_bool("1", False) is True
-
-    def test_false_variants(self):
-        assert parse_bool("false", True) is False
-        assert parse_bool("no", True) is False
-        assert parse_bool("0", True) is False
-
-    def test_invalid_returns_default(self):
-        assert parse_bool("invalid", True) is True
 
 
 class TestConfig:

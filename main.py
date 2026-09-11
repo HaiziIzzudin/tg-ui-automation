@@ -19,23 +19,12 @@ TELEGRAM_EXE = "Telegram.exe"
 TELEGRAM_PATH = r"C:\Users\haizi\AppData\Roaming\Telegram Desktop\Telegram.exe"
 TELEGRAM_TITLE = "Telegram"
 
-# Title of the secondary window (fetched from .env or fallback)
-SECOND_WINDOW_TITLE = os.getenv("SECOND_WINDOW_TITLE", "secondWindowTitle") 
-
 MONITOR_INTERVAL = 3.0      # Seconds to wait between process checks
 LAUNCH_TIMEOUT = 7.0        # Seconds to wait for Telegram to launch
 ACTION_DELAY = 0.5          # Seconds to wait between window actions (resize/click)
 RETRY_INTERVAL = 3.0        # Seconds between click retry attempts
 
 TELEGRAM_SIZE = (800, 600)
-SECOND_WINDOW_SIZE = (1280, 1032)
-SECOND_WINDOW_POS = (0, 0)
-
-CLICK_COORDS = [
-    (44, 240),
-    (207, 119),
-    (755, 113)
-]
 
 # Initialize config from environment variables
 config = Config()
@@ -138,9 +127,30 @@ def perform_telegram_actions():
         time.sleep(ACTION_DELAY)
         
         # 2. Perform Clicks
-        if not config.click_points:
-            logger.warning("No click points configured. Skipping click sequence.")
-            return True
+        return perform_click_sequence()
+    
+    except Exception as e:
+        logger.error(f"Error during Telegram actions: {e}")
+        return False
+
+def perform_click_sequence() -> bool:
+    """Perform the click sequence on the Telegram window without resizing."""
+    windows = gw.getWindowsWithTitle(TELEGRAM_TITLE)
+    target_win = next((w for w in windows if w.title == TELEGRAM_TITLE), None)
+    
+    if not target_win:
+        logger.error("Could not find Telegram window for click sequence.")
+        return False
+    
+    if not config.click_points:
+        logger.warning("No click points configured. Skipping click sequence.")
+        return True
+    
+    try:
+        if target_win.isMinimized:
+            target_win.restore()
+        target_win.activate()
+        time.sleep(ACTION_DELAY)
         
         win_x, win_y = target_win.topleft
         logger.info(f"Telegram Window position: ({win_x}, {win_y})")
@@ -150,15 +160,13 @@ def perform_telegram_actions():
             target_y = win_y + offset_y
             logger.info(f"Action {idx+1}/{len(config.click_points)}: Clicking at relative ({offset_x}, {offset_y}) -> absolute ({target_x}, {target_y})")
             
-            # Move slowly to coordinate and click (aids debugging visually initially)
             pyautogui.moveTo(target_x, target_y, duration=0.2)
             pyautogui.click()
             time.sleep(ACTION_DELAY)
-            
+        
         return True
-    
     except Exception as e:
-        logger.error(f"Error during Telegram actions: {e}")
+        logger.error(f"Error during click sequence: {e}")
         return False
 
 def setup_second_window() -> bool:
@@ -278,7 +286,7 @@ def main():
                     retry_count = 0
                     while retry_count < config.second_window_retry_limit:
                         logger.info(f"Click Retry attempt {retry_count + 1}/{config.second_window_retry_limit}")
-                        perform_telegram_actions()
+                        perform_click_sequence()
                         time.sleep(RETRY_INTERVAL)
                         windows = gw.getWindowsWithTitle(config.second_window_title)
                         if windows:
