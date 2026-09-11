@@ -299,6 +299,10 @@ def main():
                         kill_telegram()
                         time.sleep(config.kill_cooldown_seconds)
                         continue
+                    else:
+                        # Window found after retry, apply size/position settings
+                        if not setup_second_window():
+                            logger.warning("Failed to setup second window after click retry.")
                 
             # Sleep until the next check
             time.sleep(MONITOR_INTERVAL)
