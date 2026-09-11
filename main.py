@@ -6,9 +6,8 @@ import pyautogui
 import pygetwindow as gw
 import psutil
 import ctypes
-import threading
 from dotenv import load_dotenv
-import grid_server
+from config import Config
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,6 +25,7 @@ SECOND_WINDOW_TITLE = os.getenv("SECOND_WINDOW_TITLE", "secondWindowTitle")
 MONITOR_INTERVAL = 3.0      # Seconds to wait between process checks
 LAUNCH_TIMEOUT = 7.0        # Seconds to wait for Telegram to launch
 ACTION_DELAY = 0.5          # Seconds to wait between window actions (resize/click)
+RETRY_INTERVAL = 3.0        # Seconds between click retry attempts
 
 TELEGRAM_SIZE = (800, 600)
 SECOND_WINDOW_SIZE = (1280, 1032)
@@ -36,6 +36,9 @@ CLICK_COORDS = [
     (207, 119),
     (755, 113)
 ]
+
+# Initialize config from environment variables
+config = Config()
 
 # ==============================================================================
 # LOGGING SETUP
@@ -135,13 +138,17 @@ def perform_telegram_actions():
         time.sleep(ACTION_DELAY)
         
         # 2. Perform Clicks
+        if not config.click_points:
+            logger.warning("No click points configured. Skipping click sequence.")
+            return True
+        
         win_x, win_y = target_win.topleft
         logger.info(f"Telegram Window position: ({win_x}, {win_y})")
         
-        for idx, (offset_x, offset_y) in enumerate(CLICK_COORDS):
+        for idx, (offset_x, offset_y) in enumerate(config.click_points):
             target_x = win_x + offset_x
             target_y = win_y + offset_y
-            logger.info(f"Action {idx+1}/{len(CLICK_COORDS)}: Clicking at relative ({offset_x}, {offset_y}) -> absolute ({target_x}, {target_y})")
+            logger.info(f"Action {idx+1}/{len(config.click_points)}: Clicking at relative ({offset_x}, {offset_y}) -> absolute ({target_x}, {target_y})")
             
             # Move slowly to coordinate and click (aids debugging visually initially)
             pyautogui.moveTo(target_x, target_y, duration=0.2)
@@ -156,11 +163,11 @@ def perform_telegram_actions():
 
 def setup_second_window() -> bool:
     """Find, resize, and move the secondary target window."""
-    logger.info(f"Searching for secondary window: '{SECOND_WINDOW_TITLE}'...")
-    windows = gw.getWindowsWithTitle(SECOND_WINDOW_TITLE)
+    logger.info(f"Searching for secondary window: '{config.second_window_title}'...")
+    windows = gw.getWindowsWithTitle(config.second_window_title)
     
     if not windows:
-        logger.error(f"Secondary window ('{SECOND_WINDOW_TITLE}') not found. Ensure title is correct.")
+        logger.error(f"Secondary window ('{config.second_window_title}') not found. Ensure title is correct.")
         return False
         
     try:
@@ -169,12 +176,27 @@ def setup_second_window() -> bool:
         if target_win.isMinimized:
             target_win.restore()
             
-        logger.info(f"Moving '{SECOND_WINDOW_TITLE}' to {SECOND_WINDOW_POS}...")
-        target_win.moveTo(SECOND_WINDOW_POS[0], SECOND_WINDOW_POS[1])
-        time.sleep(ACTION_DELAY)
+        # If config.second_window_size is None, maximize the window
+        if config.second_window_size is None:
+            logger.info(f"Maximizing '{config.second_window_title}'...")
+            target_win.maximize()
+        else:
+            screen_w, screen_h = config.get_screen_bounds()
+            req_w, req_h = config.second_window_size
+            clamped_w = min(req_w, screen_w)
+            clamped_h = min(req_h, screen_h)
+            if clamped_w != req_w or clamped_h != req_h:
+                logger.warning(
+                    f"Requested size {req_w}x{req_h} exceeds screen bounds "
+                    f"{screen_w}x{screen_h}; clamping to {clamped_w}x{clamped_h}."
+                )
 
-        logger.info(f"Resizing '{SECOND_WINDOW_TITLE}' to {SECOND_WINDOW_SIZE}...")
-        target_win.resizeTo(SECOND_WINDOW_SIZE[0], SECOND_WINDOW_SIZE[1])
+            logger.info(f"Moving '{config.second_window_title}' to {config.second_window_pos}...")
+            target_win.moveTo(config.second_window_pos[0], config.second_window_pos[1])
+            time.sleep(ACTION_DELAY)
+
+            logger.info(f"Resizing '{config.second_window_title}' to {clamped_w}x{clamped_h}...")
+            target_win.resizeTo(clamped_w, clamped_h)
         time.sleep(ACTION_DELAY)
         
         return True
@@ -183,23 +205,31 @@ def setup_second_window() -> bool:
         return False
 
 def ensure_correct_resolution():
-    """Check if current resolution is 1920x1080, if not, fix it."""
+    """Check if current resolution matches configured values, if not, fix it."""
     user32 = ctypes.windll.user32
     width = user32.GetSystemMetrics(0)
     height = user32.GetSystemMetrics(1)
 
-    if width != 1920 or height != 1080:
-        logger.warning(f"Resolution mismatch detected: {width}x{height}. Expected 1920x1080. Fixing...")
+    expected_width, expected_height = config.get_expected_resolution()
+    rotation = config.screen_rotation
+    if width != expected_width or height != expected_height:
+        logger.warning(
+            f"Resolution mismatch detected: {width}x{height} (rotation {rotation}). "
+            f"Expected {expected_width}x{expected_height}. Fixing..."
+        )
         try:
             exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SetResolution.exe")
-            subprocess.run(['powershell', f'& "{exe_path}" 1080 -noprompt'], check=True)
+            subprocess.run(
+                ['powershell', f'& "{exe_path}" SET -w {expected_width} -h {expected_height} -o {rotation} -noprompt'],
+                check=True,
+            )
             logger.info("Resolution change command sent.")
             # Wait a bit for the resolution change to take effect
             time.sleep(2)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to change resolution: {e}")
     else:
-        logger.debug("Screen resolution is correct (1920x1080).")
+        logger.debug(f"Screen resolution is correct ({expected_width}x{expected_height}, rotation {rotation}).")
 
 # ==============================================================================
 # MAIN LOOP
@@ -207,12 +237,7 @@ def ensure_correct_resolution():
 
 def main():
     logger.info("Starting Telegram Monitor Service...")
-    
-    # Start Grid Interaction Server in a background thread
-    logger.info("Launching Grid Interaction Server (FastAPI) thread...")
-    api_thread = threading.Thread(target=grid_server.run_server, daemon=True)
-    api_thread.start()
-    
+
     while True:
         try:
             # Always ensure resolution is correct first
@@ -237,22 +262,35 @@ def main():
                     
                 # 3. Setup Second Window
                 if not setup_second_window():
-                    logger.warning("Secondary window not found after setup. Killing Telegram and waiting 60 seconds before retry...")
+                    logger.warning("Secondary window not found after setup. Killing Telegram and waiting %d seconds before retry...", config.kill_cooldown_seconds)
                     kill_telegram()
-                    time.sleep(30)
+                    time.sleep(config.kill_cooldown_seconds)
                     continue
                 
                 logger.info("Setup sequence completed successfully. Entering monitoring mode.")
             
             else:
                 # Telegram IS running. Now we must verify the second window is also present.
-                # If it's missing, we assume a failure state and perform recovery.
-                windows = gw.getWindowsWithTitle(SECOND_WINDOW_TITLE)
+                # If it's missing, re-run the Click Sequence up to the retry limit.
+                windows = gw.getWindowsWithTitle(config.second_window_title)
                 if not windows:
-                    logger.warning(f"Telegram is running but secondary window '{SECOND_WINDOW_TITLE}' is missing. Initiating recovery...")
-                    kill_telegram()
-                    time.sleep(60)
-                    continue
+                    logger.warning(f"Telegram is running but secondary window '{config.second_window_title}' is missing.")
+                    retry_count = 0
+                    while retry_count < config.second_window_retry_limit:
+                        logger.info(f"Click Retry attempt {retry_count + 1}/{config.second_window_retry_limit}")
+                        perform_telegram_actions()
+                        time.sleep(RETRY_INTERVAL)
+                        windows = gw.getWindowsWithTitle(config.second_window_title)
+                        if windows:
+                            logger.info(f"Target window found after {retry_count + 1} attempt(s).")
+                            break
+                        retry_count += 1
+
+                    if not windows:
+                        logger.warning("Click Retry limit exhausted. Initiating Recovery...")
+                        kill_telegram()
+                        time.sleep(config.kill_cooldown_seconds)
+                        continue
                 
             # Sleep until the next check
             time.sleep(MONITOR_INTERVAL)
