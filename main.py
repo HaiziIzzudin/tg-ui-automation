@@ -6,6 +6,7 @@ import pyautogui
 import pygetwindow as gw
 import psutil
 import ctypes
+import rotatescreen
 from dotenv import load_dotenv
 from config import Config
 
@@ -212,8 +213,49 @@ def setup_second_window() -> bool:
         logger.error(f"Error adjusting secondary window: {e}")
         return False
 
+def ensure_correct_rotation():
+    """Check if primary screen rotation matches configured value, if not, fix it.
+
+    Uses the rotatescreen library (not SetResolution.exe) to enforce rotation.
+    Retries up to 2 times on mismatch; on final failure logs a warning and
+    lets the monitor loop continue (self-heals next cycle).
+    """
+    expected_rotation = config.screen_rotation
+    display = rotatescreen.get_primary_display()
+    current = display.current_orientation
+
+    if current == expected_rotation:
+        logger.debug(f"Screen rotation is correct ({current} deg).")
+        return
+
+    max_retries = 2
+    for attempt in range(1, max_retries + 1):
+        logger.warning(
+            f"Rotation mismatch: current {current} deg, expected {expected_rotation} deg. "
+            f"Rotating (attempt {attempt}/{max_retries})..."
+        )
+        display.rotate_to(expected_rotation)
+        time.sleep(1)
+
+        # Read back actual orientation
+        current = display.current_orientation
+        if current == expected_rotation:
+            logger.info(f"Rotation corrected to {expected_rotation} deg.")
+            return
+
+    logger.warning(
+        f"Rotation still {current} deg after {max_retries} retries; "
+        f"expected {expected_rotation} deg. Will retry next cycle."
+    )
+
+
 def ensure_correct_resolution():
-    """Check if current resolution matches configured values, if not, fix it."""
+    """Check if current resolution matches configured values, if not, fix it.
+
+    Reads back actual dimensions after the exe call and retries once on
+    mismatch. On final failure logs a warning and lets the monitor loop
+    continue (self-heals next cycle).
+    """
     user32 = ctypes.windll.user32
     width = user32.GetSystemMetrics(0)
     height = user32.GetSystemMetrics(1)
@@ -225,17 +267,36 @@ def ensure_correct_resolution():
             f"Resolution mismatch detected: {width}x{height} (rotation {rotation}). "
             f"Expected {expected_width}x{expected_height}. Fixing..."
         )
-        try:
-            exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SetResolution.exe")
-            subprocess.run(
-                ['powershell', f'& "{exe_path}" SET -w {expected_width} -h {expected_height} -o {rotation} -noprompt'],
-                check=True,
+        exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SetResolution.exe")
+
+        for attempt in range(2):
+            try:
+                subprocess.run(
+                    ['powershell', f'& "{exe_path}" SET -w {expected_width} -h {expected_height} -noprompt'],
+                    check=True,
+                )
+                logger.info("Resolution change command sent.")
+                time.sleep(2)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to change resolution: {e}")
+                break
+
+            # Read back actual resolution
+            width = user32.GetSystemMetrics(0)
+            height = user32.GetSystemMetrics(1)
+            if width == expected_width and height == expected_height:
+                logger.info(f"Resolution corrected to {expected_width}x{expected_height}.")
+                return
+
+            logger.debug(
+                f"Resolution still {width}x{height} after attempt {attempt + 1}; "
+                f"expected {expected_width}x{expected_height}."
             )
-            logger.info("Resolution change command sent.")
-            # Wait a bit for the resolution change to take effect
-            time.sleep(2)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to change resolution: {e}")
+
+        logger.warning(
+            f"Resolution mismatch persists ({width}x{height} vs "
+            f"{expected_width}x{expected_height}). Will retry next cycle."
+        )
     else:
         logger.debug(f"Screen resolution is correct ({expected_width}x{expected_height}, rotation {rotation}).")
 
@@ -248,7 +309,8 @@ def main():
 
     while True:
         try:
-            # Always ensure resolution is correct first
+            # Always ensure rotation first, then resolution
+            ensure_correct_rotation()
             ensure_correct_resolution()
             
             telegram_running = is_telegram_running()

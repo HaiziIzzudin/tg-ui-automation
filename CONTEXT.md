@@ -35,3 +35,7 @@ _Avoid_: Restart, reset
 **Cooldown**:
 The wait period after Recovery before the monitor loop checks again.
 _Avoid_: Delay, backoff
+
+**Rotation**:
+The orientation of the primary screen in degrees (0, 90, 180, 270); the automator enforces the configured Rotation alongside resolution.
+_Avoid_: Orientation, tilt

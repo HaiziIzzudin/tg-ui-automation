@@ -20,3 +20,7 @@ Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
 ### `SetResolution.exe`
 
 Available at https://raw.githubusercontent.com/RickStrahl/SetResolution/refs/heads/master/README.md
+
+### `rotate-screen (pip)`
+
+https://raw.githubusercontent.com/danny-burrows/rotate-screen/refs/heads/main/README.md

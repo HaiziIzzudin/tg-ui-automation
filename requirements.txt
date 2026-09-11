@@ -3,3 +3,4 @@ pygetwindow
 psutil
 python-dotenv
 pytest
+rotate-screen
