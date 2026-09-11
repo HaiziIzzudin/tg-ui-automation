@@ -77,6 +77,18 @@ def parse_int(value: str, default: int) -> int:
         return default
 
 
+def parse_float(value: str, default: float) -> float:
+    """Parse a float string, returning default if invalid or non-positive."""
+    try:
+        f = float(value)
+        if f <= 0:
+            raise ValueError("Non-positive value")
+        return f
+    except (ValueError, AttributeError) as e:
+        logger.warning(f"Invalid float '{value}': {e}. Using default {default}.")
+        return default
+
+
 def parse_maximized(value: str, default: Tuple[int, int]) -> Optional[Tuple[int, int]]:
     """Parse a window size string; returns None if 'maximized', else parses as resolution."""
     if value.strip().lower() == "maximized":
@@ -121,6 +133,10 @@ class Config:
         self.second_window_retry_limit = parse_int(
             os.getenv("SECOND_WINDOW_RETRY_LIMIT", "3"),
             3,
+        )
+        self.click_retry_interval = parse_float(
+            os.getenv("CLICK_RETRY_INTERVAL", "3.0"),
+            3.0,
         )
 
     def get_screen_bounds(self) -> Tuple[int, int]:

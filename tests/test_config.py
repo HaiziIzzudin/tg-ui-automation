@@ -11,6 +11,7 @@ from config import (
     parse_position,
     parse_click_points,
     parse_int,
+    parse_float,
     parse_maximized,
     Config,
     clamp_rotation,
@@ -89,6 +90,23 @@ class TestParseInt:
         assert parse_int("3.14", 10) == 10
 
 
+class TestParseFloat:
+    def test_valid_float(self):
+        assert parse_float("3.5", 0.0) == 3.5
+
+    def test_invalid_returns_default(self):
+        assert parse_float("abc", 2.5) == 2.5
+
+    def test_negative_returns_default(self):
+        assert parse_float("-1.5", 1.0) == 1.0
+
+    def test_zero_returns_default(self):
+        assert parse_float("0.0", 1.0) == 1.0
+
+    def test_integer_string(self):
+        assert parse_float("5", 0.0) == 5.0
+
+
 class TestParseMaximized:
     def test_maximized_string(self):
         assert parse_maximized("maximized", (100, 100)) is None
@@ -113,6 +131,7 @@ class TestConfig:
         monkeypatch.delenv("SECOND_WINDOW_POS", raising=False)
         monkeypatch.delenv("KILL_COOLDOWN_SECONDS", raising=False)
         monkeypatch.delenv("SECOND_WINDOW_RETRY_LIMIT", raising=False)
+        monkeypatch.delenv("CLICK_RETRY_INTERVAL", raising=False)
 
         config = Config()
         assert config.second_window_title == "secondWindowTitle"
@@ -123,6 +142,7 @@ class TestConfig:
         assert config.second_window_pos == (0, 0)
         assert config.kill_cooldown_seconds == 60
         assert config.second_window_retry_limit == 3
+        assert config.click_retry_interval == 3.0
 
     def test_custom_values(self, monkeypatch):
         monkeypatch.setenv("SECOND_WINDOW_TITLE", "MyWindow")
@@ -133,6 +153,7 @@ class TestConfig:
         monkeypatch.setenv("SECOND_WINDOW_POS", "100,200")
         monkeypatch.setenv("KILL_COOLDOWN_SECONDS", "30")
         monkeypatch.setenv("SECOND_WINDOW_RETRY_LIMIT", "5")
+        monkeypatch.setenv("CLICK_RETRY_INTERVAL", "1.5")
 
         config = Config()
         assert config.second_window_title == "MyWindow"
@@ -143,6 +164,7 @@ class TestConfig:
         assert config.second_window_pos == (100, 200)
         assert config.kill_cooldown_seconds == 30
         assert config.second_window_retry_limit == 5
+        assert config.click_retry_interval == 1.5
 
     def test_malformed_values_fallback(self, monkeypatch):
         monkeypatch.setenv("SCREEN_RESOLUTION", "invalid")
@@ -152,6 +174,7 @@ class TestConfig:
         monkeypatch.setenv("SECOND_WINDOW_POS", "invalid")
         monkeypatch.setenv("KILL_COOLDOWN_SECONDS", "abc")
         monkeypatch.setenv("SECOND_WINDOW_RETRY_LIMIT", "abc")
+        monkeypatch.setenv("CLICK_RETRY_INTERVAL", "abc")
 
         config = Config()
         assert config.screen_resolution == (1920, 1080)  # default
@@ -161,6 +184,7 @@ class TestConfig:
         assert config.second_window_pos == (0, 0)  # default
         assert config.kill_cooldown_seconds == 60  # default
         assert config.second_window_retry_limit == 3  # default
+        assert config.click_retry_interval == 3.0  # default
 
 
 class TestClampRotation:

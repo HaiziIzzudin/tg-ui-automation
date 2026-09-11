@@ -22,7 +22,7 @@ TELEGRAM_TITLE = "Telegram"
 MONITOR_INTERVAL = 3.0      # Seconds to wait between process checks
 LAUNCH_TIMEOUT = 7.0        # Seconds to wait for Telegram to launch
 ACTION_DELAY = 0.5          # Seconds to wait between window actions (resize/click)
-RETRY_INTERVAL = 3.0        # Seconds between click retry attempts
+
 
 TELEGRAM_SIZE = (800, 600)
 
@@ -287,7 +287,7 @@ def main():
                     while retry_count < config.second_window_retry_limit:
                         logger.info(f"Click Retry attempt {retry_count + 1}/{config.second_window_retry_limit}")
                         perform_click_sequence()
-                        time.sleep(RETRY_INTERVAL)
+                        time.sleep(config.click_retry_interval)
                         windows = gw.getWindowsWithTitle(config.second_window_title)
                         if windows:
                             logger.info(f"Target window found after {retry_count + 1} attempt(s).")
