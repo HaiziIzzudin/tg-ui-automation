@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import subprocess
 import logging
@@ -35,11 +36,18 @@ config = Config()
 # ==============================================================================
 # Set up logging to both console and a file in the same directory as the script.
 log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_monitor.log")
+
+# Ensure stdout/stderr support UTF-8 (emoji in window titles, etc.)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler(log_file),
+        logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
