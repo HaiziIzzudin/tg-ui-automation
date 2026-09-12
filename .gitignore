@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.venv/
 
 # Logs
 telegram_monitor.log

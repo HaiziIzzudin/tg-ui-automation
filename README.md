@@ -34,7 +34,13 @@ python telegram_automator.py
 The script will run in the background (console) and log its activity to `telegram_monitor.log`. 
 
 ## About pixel targeting
-Use tool like AutoIt3 (Au3Info.exe) to see the window title information or the pixel location, if require.
+Every size and coordinate in `.env` (`CLICK_POINTS`, `SECOND_WINDOW_SIZE`, `SECOND_WINDOW_POS`, and the built-in Telegram window size) is measured in **100% scaling pixels**.
+
+The script reads the monitor's display scaling (100%, 150%, 200%, ...) at runtime and converts these values to real screen pixels automatically, so the same `.env` values work at any scaling. No manual adjustment is needed.
+
+To measure Click Targets, use a tool like AutoIt3 (Au3Info.exe) while your display scaling is at **100%**. If you must measure at a different scaling, divide the measured pixel by your scaling factor (e.g. 66 px measured at 150% → write 44).
+
+The script logs the scale factor and the real pixel positions it clicks, so you can verify targeting in `telegram_monitor.log`.
 
 ## How it Works
 1. **Detection**: Checks the Windows process list for `Telegram.exe`.
@@ -46,5 +52,5 @@ Use tool like AutoIt3 (Au3Info.exe) to see the window title information or the p
 Microsoft Windows with a 1080p (100% scaling) monitor as primary monitor.
 
 ## Troubleshooting
-- **Coordinates**: If your monitor scaling (DPI) is not 100%, the click coordinates might need adjustment in the script configuration.
+- **Coordinates**: Click coordinates are measured at 100% scaling; the script compensates for other scaling factors automatically. See "About pixel targeting" above.
 - **Window Titles**: Ensure the window title in `.env` is exactly as it appears in the taskbar.

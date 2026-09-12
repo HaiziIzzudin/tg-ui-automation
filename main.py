@@ -17,7 +17,7 @@ load_dotenv()
 # CONFIGURATION
 # ==============================================================================
 TELEGRAM_EXE = "Telegram.exe"
-TELEGRAM_PATH = r"C:\Users\haizi\AppData\Roaming\Telegram Desktop\Telegram.exe"
+TELEGRAM_PATH = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Telegram Desktop", "Telegram.exe")
 TELEGRAM_TITLE = "Telegram"
 
 MONITOR_INTERVAL = 3.0      # Seconds to wait between process checks
@@ -44,6 +44,30 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# DPI AWARENESS
+# ==============================================================================
+
+def set_dpi_awareness():
+    """Make the process DPI-aware so Windows reports real pixels.
+
+    Tries Per-Monitor-V2 first (Windows 10 1703+), then falls back to
+    system-aware (older Windows). Logs the outcome.
+    """
+    try:
+        # Per-Monitor V2 (Windows 10 1703+)
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        ctypes.windll.shcore.SetProcessDpiAwarenessContext(-4)
+        logger.info("DPI awareness set to Per-Monitor-V2.")
+    except Exception:
+        try:
+            # System-aware fallback (Windows 8.1+)
+            # DPI_AWARENESS_PER_MONITOR_AWARE = 2
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            logger.info("DPI awareness set to System-Aware (fallback).")
+        except Exception as e:
+            logger.warning(f"Could not set DPI awareness: {e}. Coordinates may be virtualized.")
 
 # ==============================================================================
 # CORE FUNCTIONS
@@ -118,12 +142,19 @@ def perform_telegram_actions():
         return False
         
     try:
-        # 1. Resize Telegram
-        logger.info(f"Resizing Telegram window to {TELEGRAM_SIZE}...")
+        # 1. Resize Telegram (scale-compensated)
+        config.refresh_scale_factor()
+        sf = config.scale_factor
+        real_w = int(TELEGRAM_SIZE[0] * sf)
+        real_h = int(TELEGRAM_SIZE[1] * sf)
+        logger.info(
+            f"Resizing Telegram: configured {TELEGRAM_SIZE[0]}x{TELEGRAM_SIZE[1]} "
+            f"@ scale {sf} -> real {real_w}x{real_h}..."
+        )
         if target_win.isMinimized:
             target_win.restore()
         
-        target_win.resizeTo(TELEGRAM_SIZE[0], TELEGRAM_SIZE[1])
+        target_win.resizeTo(real_w, real_h)
         target_win.activate() # Bring to front
         time.sleep(ACTION_DELAY)
         
@@ -135,7 +166,14 @@ def perform_telegram_actions():
         return False
 
 def perform_click_sequence() -> bool:
-    """Perform the click sequence on the Telegram window without resizing."""
+    """Perform the click sequence on the Telegram window without resizing.
+
+    Click targets are in 100%-scale pixel coordinates (from .env).  They are
+    multiplied by the current DPI scale factor so that at 150% scaling the
+    real pixel position is 1.5× the configured offset, landing on the same
+    UI elements as at 100%.  The scale factor is read fresh at the start of
+    each run.
+    """
     windows = gw.getWindowsWithTitle(TELEGRAM_TITLE)
     target_win = next((w for w in windows if w.title == TELEGRAM_TITLE), None)
     
@@ -148,6 +186,11 @@ def perform_click_sequence() -> bool:
         return True
     
     try:
+        # Read the scale factor fresh for this click run
+        config.refresh_scale_factor()
+        scale = config.scale_factor
+        logger.info(f"Click Sequence Scale Factor: {scale}")
+        
         if target_win.isMinimized:
             target_win.restore()
         target_win.activate()
@@ -157,11 +200,15 @@ def perform_click_sequence() -> bool:
         logger.info(f"Telegram Window position: ({win_x}, {win_y})")
         
         for idx, (offset_x, offset_y) in enumerate(config.click_points):
-            target_x = win_x + offset_x
-            target_y = win_y + offset_y
-            logger.info(f"Action {idx+1}/{len(config.click_points)}: Clicking at relative ({offset_x}, {offset_y}) -> absolute ({target_x}, {target_y})")
+            real_x = win_x + offset_x * scale
+            real_y = win_y + offset_y * scale
+            logger.info(
+                f"Action {idx+1}/{len(config.click_points)}: "
+                f"Click target ({offset_x}, {offset_y}) * scale {scale} -> "
+                f"real pixel ({real_x}, {real_y})"
+            )
             
-            pyautogui.moveTo(target_x, target_y, duration=0.2)
+            pyautogui.moveTo(real_x, real_y, duration=0.2)
             pyautogui.click()
             time.sleep(ACTION_DELAY)
         
@@ -190,18 +237,30 @@ def setup_second_window() -> bool:
             logger.info(f"Maximizing '{config.second_window_title}'...")
             target_win.maximize()
         else:
+            sf = config.refresh_scale_factor()
             screen_w, screen_h = config.get_screen_bounds()
             req_w, req_h = config.second_window_size
-            clamped_w = min(req_w, screen_w)
-            clamped_h = min(req_h, screen_h)
-            if clamped_w != req_w or clamped_h != req_h:
+            real_w = int(req_w * sf)
+            real_h = int(req_h * sf)
+            logger.info(
+                f"Target size: configured {req_w}x{req_h} @ scale {sf} -> real {real_w}x{real_h}"
+            )
+            clamped_w = min(real_w, screen_w)
+            clamped_h = min(real_h, screen_h)
+            if clamped_w != real_w or clamped_h != real_h:
                 logger.warning(
-                    f"Requested size {req_w}x{req_h} exceeds screen bounds "
+                    f"Converted size {real_w}x{real_h} exceeds screen bounds "
                     f"{screen_w}x{screen_h}; clamping to {clamped_w}x{clamped_h}."
                 )
 
-            logger.info(f"Moving '{config.second_window_title}' to {config.second_window_pos}...")
-            target_win.moveTo(config.second_window_pos[0], config.second_window_pos[1])
+            req_x, req_y = config.second_window_pos
+            real_x = int(req_x * sf)
+            real_y = int(req_y * sf)
+            logger.info(
+                f"Target position: configured ({req_x}, {req_y}) @ scale {sf} -> real ({real_x}, {real_y})"
+            )
+            logger.info(f"Moving '{config.second_window_title}' to ({real_x}, {real_y})...")
+            target_win.moveTo(real_x, real_y)
             time.sleep(ACTION_DELAY)
 
             logger.info(f"Resizing '{config.second_window_title}' to {clamped_w}x{clamped_h}...")
@@ -306,9 +365,14 @@ def ensure_correct_resolution():
 
 def main():
     logger.info("Starting Telegram Monitor Service...")
+    set_dpi_awareness()
 
     while True:
         try:
+            # Re-read scale factor each cycle and log it
+            config.refresh_scale_factor()
+            logger.info(f"Scale Factor: {config.scale_factor}")
+
             # Always ensure rotation first, then resolution
             ensure_correct_rotation()
             ensure_correct_resolution()

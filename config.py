@@ -89,6 +89,23 @@ def parse_float(value: str, default: float) -> float:
         return default
 
 
+def get_scale_factor() -> float:
+    """Read the current system DPI scale factor (1.0 = 96 DPI, 1.5 = 144 DPI, etc.).
+
+    Uses GetDpiForSystem() which returns the raw DPI value; dividing by 96
+    yields the standard scale factor (1.0, 1.25, 1.5, 2.0, ...).
+
+    Returns 1.0 on failure with a logged warning.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        dpi = user32.GetDpiForSystem()
+        return dpi / 96.0
+    except Exception as e:
+        logger.warning(f"Failed to read DPI scale factor: {e}. Assuming 1.0.")
+        return 1.0
+
+
 def parse_maximized(value: str, default: Tuple[int, int]) -> Optional[Tuple[int, int]]:
     """Parse a window size string; returns None if 'maximized', else parses as resolution."""
     if value.strip().lower() == "maximized":
@@ -138,6 +155,12 @@ class Config:
             os.getenv("CLICK_RETRY_INTERVAL", "3.0"),
             3.0,
         )
+        self.scale_factor: float = get_scale_factor()
+
+    def refresh_scale_factor(self) -> float:
+        """Re-read the DPI scale factor and store it. Returns the new value."""
+        self.scale_factor = get_scale_factor()
+        return self.scale_factor
 
     def get_screen_bounds(self) -> Tuple[int, int]:
         user32 = ctypes.windll.user32

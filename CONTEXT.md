@@ -17,8 +17,12 @@ A fixed list of three clicks made at pixel offsets from the Primary Window's top
 _Avoid_: Actions, clicks
 
 **Click Target**:
-One measured pixel offset from the Primary Window's top-left corner where the automator clicks. Environment-specific and tuned manually per machine.
+One measured pixel offset from the Primary Window's top-left corner, expressed in 100%-scale pixels; the automator converts it to real pixels using the current Scale Factor. Environment-specific and tuned manually per machine.
 _Avoid_: Touch target, coordinate
+
+**Scale Factor**:
+The primary screen's display scaling multiplier (1.0, 1.5, 2.0, ...), read from Windows at runtime, never changed by the automator. All configured sizes and coordinates are in 100%-scale pixels and are multiplied by the Scale Factor before use.
+_Avoid_: DPI, scaling percentage
 
 **Setup Sequence**:
 Launch Primary Window, run the Click Sequence, then position and resize the Target Window. Run when the Primary Window process is absent.
