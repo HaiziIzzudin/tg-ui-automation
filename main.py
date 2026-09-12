@@ -375,11 +375,14 @@ def main():
     logger.info("Starting Telegram Monitor Service...")
     set_dpi_awareness()
 
+    last_scale_factor = None
     while True:
         try:
-            # Re-read scale factor each cycle and log it
+            # Re-read scale factor each cycle; only log when it changes
             config.refresh_scale_factor()
-            logger.info(f"Scale Factor: {config.scale_factor}")
+            if config.scale_factor != last_scale_factor:
+                logger.info(f"Scale Factor: {config.scale_factor}")
+                last_scale_factor = config.scale_factor
 
             # Always ensure rotation first, then resolution
             ensure_correct_rotation()
