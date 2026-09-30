@@ -43,3 +43,29 @@ _Avoid_: Delay, backoff
 **Rotation**:
 The orientation of the primary screen in degrees (0, 90, 180, 270); the automator enforces the configured Rotation alongside resolution.
 _Avoid_: Orientation, tilt
+
+## Scheduling
+
+**Schedule**:
+An optional file listing when the automator may run. Multiple entries are allowed; if any entry matches, the automator runs. A missing file means "always allowed".
+_Avoid_: Timetable, whitelist
+
+**Schedule Entry**:
+One item in the Schedule: a day key (a single day name, a day span, or "all") mapped to one or more Time Ranges. Every entry needs at least one Time Range; an empty list is a broken file, not a whole-day entry.
+_Avoid_: Rule, slot
+
+**Time Range**:
+A start and end clock time inside one Schedule Entry, using the computer's own clock. Start counts as inside; end counts as outside. May cross midnight.
+_Avoid_: Interval, window (collides with windows on screen)
+
+**Allowed Period**:
+A stretch of clock time when running is permitted, computed from matching Schedule Entries.
+_Avoid_: Active time, window
+
+**Shutdown**:
+Stopping the Primary Window process because the time left the Allowed Period; the Target Window closes with it. The automator itself keeps running and waits for the next Allowed Period.
+_Avoid_: Exit, quit, close the app (they wrongly suggest the automator stops)
+
+**Suspend**:
+The quiet state while outside any Allowed Period: no Primary Window running, no window work, only clock checks.
+_Avoid_: Sleep mode, idle

@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import datetime
 import subprocess
 import logging
 import pyautogui
@@ -10,6 +11,7 @@ import ctypes
 import rotatescreen
 from dotenv import load_dotenv
 from config import Config
+from schedule import SCHEDULE_FILENAME, ScheduleError, load_schedule
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,6 +39,12 @@ config = Config()
 # Set up logging to both console and a file in the same directory as the script.
 log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_monitor.log")
 
+# Optional schedule file, one fixed name next to the app (same directory as
+# the log file). Its absence means the schedule feature is off.
+DEFAULT_SCHEDULE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), SCHEDULE_FILENAME
+)
+
 # Ensure stdout/stderr support UTF-8 (emoji in window titles, etc.)
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -52,6 +60,60 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# STARTUP SCHEDULE VALIDATION
+# ==============================================================================
+
+def validate_schedule_at_startup(path=DEFAULT_SCHEDULE_PATH):
+    """Load the schedule file at launch, or refuse to start when it is broken.
+
+    Three outcomes:
+
+    * no file at *path* → return ``None`` and run as before (24/7),
+    * a valid file → return the parsed :class:`Schedule`,
+    * a broken or empty file → log the fault and raise ``SystemExit`` so a
+      typo can never silently turn into 24/7 running.
+
+    This is the one and only place the automator exits on its own (ADR-0002).
+    It performs no window, process, resolution, or rotation work.
+    """
+    try:
+        schedule = load_schedule(path)
+    except ScheduleError as error:
+        logger.error(f"Invalid schedule file '{path}': {error}")
+        logger.error(
+            "Refusing to start. Fix the schedule file, or remove it to run 24/7."
+        )
+        raise SystemExit(1)
+
+    if schedule is None:
+        logger.debug(f"No schedule file at '{path}'; schedule feature is off.")
+    else:
+        logger.info(f"Schedule loaded from '{path}'.")
+    return schedule
+
+
+def load_live_schedule(previous, path=DEFAULT_SCHEDULE_PATH):
+    """Re-read the schedule file for this monitor cycle.
+
+    Three outcomes, matching :func:`load_schedule` but safe to call while the
+    automator is running:
+
+    * no file at *path* → return ``None`` (feature off; a deleted file means
+      running 24/7 again),
+    * a valid file → return the parsed :class:`Schedule`,
+    * a broken file → log the fault loudly and return *previous* (the last
+      good schedule). The automator never exits here (ADR-0002).
+
+    The file is read on every cycle so an edit takes effect within one cycle.
+    """
+    try:
+        return load_schedule(path)
+    except ScheduleError as error:
+        logger.error(f"Invalid schedule file '{path}': {error}")
+        logger.error("Keeping the last good schedule. Fix the file to apply the change.")
+        return previous
 
 # ==============================================================================
 # DPI AWARENESS
@@ -371,79 +433,156 @@ def ensure_correct_resolution():
 # MAIN LOOP
 # ==============================================================================
 
+# Last scale factor logged by the monitor cycle. Kept at module level so the
+# "only log when it changes" behaviour survives the move of the cycle body
+# into a reusable function.
+_last_scale_factor = None
+
+
+def has_room_to_launch(schedule, moment) -> bool:
+    """Return True when a launch started now still fits in the Allowed Period.
+
+    The guard is off (always True) when there is no schedule. With a schedule,
+    True means the period still covers ``moment`` plus ``LAUNCH_TIMEOUT``, so a
+    Setup Sequence started now will not be followed by a Shutdown seconds
+    later. The caller supplies ``moment``; this helper never reads the clock.
+    """
+    if schedule is None:
+        return True
+    return schedule.is_allowed(moment + datetime.timedelta(seconds=LAUNCH_TIMEOUT))
+
+
+def run_monitor_cycle(schedule, moment=None):
+    """Run exactly one monitor cycle.
+
+    A cycle is the smallest repeatable unit of work the monitor performs. It
+    holds the schedule gate, the screen guard, and the window management. It
+    never sleeps ``MONITOR_INTERVAL`` and never exits the process; the outer
+    :func:`main` loop sleeps between cycles.
+
+    The schedule gate sits at the very top of the cycle, before the scale
+    refresh, the screen guard, and any window work:
+
+    * inside an Allowed Period → behave exactly as before,
+    * outside every Allowed Period → perform a Shutdown when the Primary
+      Window is running (the proven hard kill; the Target Window closes with
+      it) and skip the rest of this cycle (Suspend).
+
+    A launch guard sits just below the gate: inside an Allowed Period that ends
+    within the launch window (``LAUNCH_TIMEOUT``) and with the Primary Window
+    absent, the cycle waits quietly instead of starting a Setup Sequence it
+    would have to tear down seconds later. The wait skips the screen guard and
+    all window work; the next cycle re-checks the clock.
+
+    ``moment`` is the local clock reading used by the gate. When it is
+    ``None`` the current time is read here; the schedule checker itself never
+    reads the clock.
+    """
+    global _last_scale_factor
+
+    if moment is None:
+        moment = datetime.datetime.now()
+
+    # Schedule gate: Suspend (and Shutdown when needed) outside allowed hours.
+    if schedule is not None and not schedule.is_allowed(moment):
+        if is_telegram_running():
+            logger.info("Outside the allowed period; shutting down Telegram.")
+            kill_telegram()
+        else:
+            logger.debug("Outside the allowed period; Telegram is not running.")
+        return
+
+    # Launch guard: near the end of an Allowed Period, wait quietly rather than
+    # launch Telegram only to shut it down seconds later. Only the launch (with
+    # the Primary Window absent) is guarded; a running window is left alone.
+    # ``telegram_running`` is remembered so the process check is not repeated.
+    telegram_running = None
+    if schedule is not None and not has_room_to_launch(schedule, moment):
+        if not is_telegram_running():
+            logger.info(
+                "Allowed period ends within the launch window; waiting quietly "
+                "instead of launching Telegram."
+            )
+            return
+        telegram_running = True
+
+    # Re-read scale factor each cycle; only log when it changes
+    config.refresh_scale_factor()
+    if config.scale_factor != _last_scale_factor:
+        logger.info(f"Scale Factor: {config.scale_factor}")
+        _last_scale_factor = config.scale_factor
+
+    # Always ensure rotation first, then resolution
+    ensure_correct_rotation()
+    ensure_correct_resolution()
+
+    if telegram_running is None:
+        telegram_running = is_telegram_running()
+
+    if not telegram_running:
+        logger.warning(f"Process {TELEGRAM_EXE} not found. Initiating setup sequence...")
+
+        # 1. Launch Telegram
+        if not launch_telegram():
+            logger.error("Failed to launch Telegram. Re-checking in next cycle.")
+            return
+
+        # 2. Automate Telegram window (resize, clicks)
+        if not perform_telegram_actions():
+            logger.error("Failed to complete Telegram actions. Re-checking in next cycle.")
+            return
+
+        # 3. Setup Second Window
+        if not setup_second_window():
+            logger.warning("Secondary window not found after setup. Killing Telegram and waiting %d seconds before retry...", config.kill_cooldown_seconds)
+            kill_telegram()
+            time.sleep(config.kill_cooldown_seconds)
+            return
+
+        logger.info("Setup sequence completed successfully. Entering monitoring mode.")
+
+    else:
+        # Telegram IS running. Now we must verify the second window is also present.
+        # If it's missing, re-run the Click Sequence up to the retry limit.
+        windows = gw.getWindowsWithTitle(config.second_window_title)
+        if not windows:
+            logger.warning(f"Telegram is running but secondary window '{config.second_window_title}' is missing.")
+            retry_count = 0
+            while retry_count < config.second_window_retry_limit:
+                logger.info(f"Click Retry attempt {retry_count + 1}/{config.second_window_retry_limit}")
+                perform_click_sequence()
+                time.sleep(config.click_retry_interval)
+                windows = gw.getWindowsWithTitle(config.second_window_title)
+                if windows:
+                    logger.info(f"Target window found after {retry_count + 1} attempt(s).")
+                    break
+                retry_count += 1
+
+            if not windows:
+                logger.warning("Click Retry limit exhausted. Initiating Recovery...")
+                kill_telegram()
+                time.sleep(config.kill_cooldown_seconds)
+                return
+            else:
+                # Window found after retry, apply size/position settings
+                if not setup_second_window():
+                    logger.warning("Failed to setup second window after click retry.")
+
+
 def main():
     logger.info("Starting Telegram Monitor Service...")
+    schedule = validate_schedule_at_startup()
     set_dpi_awareness()
 
-    last_scale_factor = None
     while True:
         try:
-            # Re-read scale factor each cycle; only log when it changes
-            config.refresh_scale_factor()
-            if config.scale_factor != last_scale_factor:
-                logger.info(f"Scale Factor: {config.scale_factor}")
-                last_scale_factor = config.scale_factor
+            # Re-read the schedule every cycle so an edit applies within a cycle
+            schedule = load_live_schedule(schedule)
+            run_monitor_cycle(schedule)
 
-            # Always ensure rotation first, then resolution
-            ensure_correct_rotation()
-            ensure_correct_resolution()
-            
-            telegram_running = is_telegram_running()
-            
-            if not telegram_running:
-                logger.warning(f"Process {TELEGRAM_EXE} not found. Initiating setup sequence...")
-                
-                # 1. Launch Telegram
-                if not launch_telegram():
-                    logger.error("Failed to launch Telegram. Re-checking in next cycle.")
-                    time.sleep(MONITOR_INTERVAL)
-                    continue
-                
-                # 2. Automate Telegram window (resize, clicks)
-                if not perform_telegram_actions():
-                    logger.error("Failed to complete Telegram actions. Re-checking in next cycle.")
-                    time.sleep(MONITOR_INTERVAL)
-                    continue
-                    
-                # 3. Setup Second Window
-                if not setup_second_window():
-                    logger.warning("Secondary window not found after setup. Killing Telegram and waiting %d seconds before retry...", config.kill_cooldown_seconds)
-                    kill_telegram()
-                    time.sleep(config.kill_cooldown_seconds)
-                    continue
-                
-                logger.info("Setup sequence completed successfully. Entering monitoring mode.")
-            
-            else:
-                # Telegram IS running. Now we must verify the second window is also present.
-                # If it's missing, re-run the Click Sequence up to the retry limit.
-                windows = gw.getWindowsWithTitle(config.second_window_title)
-                if not windows:
-                    logger.warning(f"Telegram is running but secondary window '{config.second_window_title}' is missing.")
-                    retry_count = 0
-                    while retry_count < config.second_window_retry_limit:
-                        logger.info(f"Click Retry attempt {retry_count + 1}/{config.second_window_retry_limit}")
-                        perform_click_sequence()
-                        time.sleep(config.click_retry_interval)
-                        windows = gw.getWindowsWithTitle(config.second_window_title)
-                        if windows:
-                            logger.info(f"Target window found after {retry_count + 1} attempt(s).")
-                            break
-                        retry_count += 1
-
-                    if not windows:
-                        logger.warning("Click Retry limit exhausted. Initiating Recovery...")
-                        kill_telegram()
-                        time.sleep(config.kill_cooldown_seconds)
-                        continue
-                    else:
-                        # Window found after retry, apply size/position settings
-                        if not setup_second_window():
-                            logger.warning("Failed to setup second window after click retry.")
-                
             # Sleep until the next check
             time.sleep(MONITOR_INTERVAL)
-            
+
         except KeyboardInterrupt:
             logger.info("Monitor Service stopped by user.")
             break

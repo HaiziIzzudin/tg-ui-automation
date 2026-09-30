@@ -12,6 +12,7 @@ A specialized Windows Python utility that keeps Telegram and a target secondary 
 - **Resolution & Rotation Enforcement**: Checks the screen resolution and rotation every cycle and fixes them automatically (via `rotate-screen` and the bundled `SetResolution.exe`).
 - **Display Scaling Compensation**: All configured sizes and coordinates are measured in 100% scaling pixels and converted to real pixels at runtime (see "About pixel targeting").
 - **Secure Configuration**: Uses a `.env` file for sensitive window titles and all tunable settings.
+- **Time Ranges (Schedule)**: Optionally limit when Telegram runs to day/time ranges defined in a `schedule.json` file (see "Schedule" below).
 
 ## Prerequisites
 - Windows OS
@@ -42,6 +43,30 @@ Run the tests with:
 pytest
 ```
 
+## Schedule (`schedule.json`)
+The automator normally runs 24/7. Optionally, place a `schedule.json` file next to the app to restrict when Telegram runs. If the file is **absent**, the automator behaves exactly as always (24/7).
+
+The automator itself is the time keeper — it never exits on its own. Outside the allowed time ranges it stops Telegram (the secondary window closes with it), then quietly waits and starts Telegram again by itself when the next time range begins. Only you stop the automator (Ctrl+C). While suspended, it also stops enforcing resolution and rotation — the machine is fully yours.
+
+Format: day keys mapped to a list of time ranges. Day keys are day names (`mon`…`sun`, case-insensitive), day spans (`mon-fri`, may wrap the week, e.g. `sat-mon`), or `all` (every day). Ranges are `HH:MM-HH:MM`, optionally with seconds (`HH:MM:SS-HH:MM:SS`); both ends of one range must use the same precision. Ranges may cross midnight — the part after midnight belongs to the day the range started on. The range start counts as inside, the end counts as outside. Overlapping ranges simply add up.
+
+Example:
+
+```json
+{
+  "mon-fri": ["08:00-17:00"],
+  "sat":     ["10:00-12:30", "13:30-18:00"],
+  "all":     ["22:00-02:00"]
+}
+```
+
+Notes:
+- Times use your computer's own local clock. There is no time-zone setting.
+- Edit the file at any time — it is re-read on every monitor cycle (a few seconds), so the change applies without a restart.
+- A broken file (bad day name, bad time, start equal to end, empty list, empty or non-object content) stops the automator at startup with a clear error. While running, a broken edit keeps the last working schedule and logs the problem loudly.
+- Deliberately skipping the full setup near the end of a range: when Telegram isn't already running and the range ends within the launch window (about 7 seconds), the automator waits instead of launching Telegram just to close it seconds later.
+- Use `example.schedule.json` as a starting point.
+
 ## Configuration (`.env`)
 All settings are optional and fall back to sensible defaults (see `example.env`):
 
@@ -67,11 +92,12 @@ To measure Click Targets, use a tool like AutoIt3 (Au3Info.exe) while your displ
 The script logs the scale factor and the real pixel positions it clicks, so you can verify targeting in `telegram_monitor.log`.
 
 ## How it Works
-1. **Detection**: Checks the Windows process list for `Telegram.exe`.
-2. **Screen Guard**: Every cycle, compares actual rotation and resolution against `SCREEN_ROTATION` / `SCREEN_RESOLUTION` and fixes mismatches (retries with read-back before giving up until the next cycle).
-3. **Setup**: Launches Telegram, resizes it to 800x600, and clicks the configured `CLICK_POINTS` inside.
-4. **Adjustment**: Moves and resizes the secondary window specified in your `.env` (or maximizes it).
-5. **Monitoring**: Stays active:
+1. **Schedule Gate** (optional): If `schedule.json` exists and the current time is outside all allowed ranges, stops Telegram (if running), skips all other work this cycle (no screen enforcement), and waits for the next range. Everything below is skipped while suspended.
+2. **Detection**: Checks the Windows process list for `Telegram.exe`.
+3. **Screen Guard**: Every cycle, compares actual rotation and resolution against `SCREEN_ROTATION` / `SCREEN_RESOLUTION` and fixes mismatches (retries with read-back before giving up until the next cycle).
+4. **Setup**: Launches Telegram, resizes it to 800x600, and clicks the configured `CLICK_POINTS` inside.
+5. **Adjustment**: Moves and resizes the secondary window specified in your `.env` (or maximizes it).
+6. **Monitoring**: Stays active:
    - If the Telegram process disappears, re-runs the full setup.
    - If the secondary window is lost while Telegram is running, retries the click sequence up to `SECOND_WINDOW_RETRY_LIMIT` times (spaced by `CLICK_RETRY_INTERVAL`); if that fails, kills Telegram and waits `KILL_COOLDOWN_SECONDS` before restarting.
 
