@@ -14,9 +14,12 @@ telegram_monitor.log
 # Other
 SetResolution.xml
 scr_res_implement.py
+schedule.json
+storyboard_gen.ps1
 
 # temporary stuff
 .scratch/
+.mypy_cache/
 
 # tests
 tests/
