@@ -10,7 +10,7 @@ When the screen does not match the configured Resolution or Rotation, the fix tu
 
 ## Consequences
 
-- A fix costs up to two turns plus one size call, with visible flicker; every move is verified by reading the screen back and gets at most two attempts. Accepted for reliability; when everything is correct the screen is never touched.
+- A fix costs two turns plus one size call when every move works on its first attempt — four turns and two size calls in the worst case — with visible flicker; every move is verified by reading the screen back and gets at most two attempts. Accepted for reliability; when everything is correct the screen is never touched.
 - A failed first turn aborts the whole fix for that cycle — the size is never set on a screen that is still sideways. The size move, in turn, never blocks the final turn: the screen always finishes at the configured Rotation when the turns work, and a failed final turn is simply retried next cycle.
 - The tool split is permanent, not temporary: rotation through the rotation library, size through the resolution tool without any orientation flag. A reader tempted to "simplify" this into one call reintroduces the upstream bug.
 - If the resolution tool's orientation option is ever fixed upstream, the one-shot alternative becomes worth revisiting — until then it stays rejected.
