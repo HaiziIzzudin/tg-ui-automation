@@ -30,6 +30,11 @@ ACTION_DELAY = 0.5          # Seconds to wait between window actions (resize/cli
 
 TELEGRAM_SIZE = (800, 600)
 
+# In a dry run, only this many clicks of the Click Sequence are performed for
+# real; the rest (starting with the third click, the one that opens the Target
+# Window) are skipped.
+DRY_RUN_CLICKS = 2
+
 # Initialize config from environment variables
 config = Config()
 
@@ -60,6 +65,18 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# COMMAND LINE
+# ==============================================================================
+
+def dry_run_requested(argv) -> bool:
+    """Return True when ``--dry-run`` appears on the command line.
+
+    The argument list is passed in (not read from ``sys.argv``) so tests can
+    exercise it without touching the real command line.
+    """
+    return "--dry-run" in argv
 
 # ==============================================================================
 # STARTUP SCHEDULE VALIDATION
@@ -202,8 +219,12 @@ def launch_telegram() -> bool:
     logger.error(f"Timeout: Telegram window did not appear after {LAUNCH_TIMEOUT} seconds.")
     return False
 
-def perform_telegram_actions():
-    """Resize the Telegram window and perform the click sequence."""
+def perform_telegram_actions(dry_run: bool = False) -> bool:
+    """Resize the Telegram window and perform the click sequence.
+
+    In a dry run the click sequence is limited to its first clicks (see
+    :func:`perform_click_sequence`); the resize itself still happens.
+    """
     windows = gw.getWindowsWithTitle(TELEGRAM_TITLE)
     target_win = next((w for w in windows if w.title == TELEGRAM_TITLE), None)
     
@@ -229,13 +250,13 @@ def perform_telegram_actions():
         time.sleep(ACTION_DELAY)
         
         # 2. Perform Clicks
-        return perform_click_sequence()
+        return perform_click_sequence(dry_run=dry_run)
     
     except Exception as e:
         logger.error(f"Error during Telegram actions: {e}")
         return False
 
-def perform_click_sequence() -> bool:
+def perform_click_sequence(dry_run: bool = False) -> bool:
     """Perform the click sequence on the Telegram window without resizing.
 
     Click targets are in 100%-scale pixel coordinates (from .env).  They are
@@ -243,6 +264,11 @@ def perform_click_sequence() -> bool:
     real pixel position is 1.5× the configured offset, landing on the same
     UI elements as at 100%.  The scale factor is read fresh at the start of
     each run.
+
+    In a dry run only the first ``DRY_RUN_CLICKS`` clicks are performed for
+    real; the rest (starting with the third click, the one that opens the
+    Target Window) are skipped and the stop is logged.  Nothing else about
+    the run changes.
     """
     windows = gw.getWindowsWithTitle(TELEGRAM_TITLE)
     target_win = next((w for w in windows if w.title == TELEGRAM_TITLE), None)
@@ -270,6 +296,12 @@ def perform_click_sequence() -> bool:
         logger.info(f"Telegram Window position: ({win_x}, {win_y})")
         
         for idx, (offset_x, offset_y) in enumerate(config.click_points):
+            if dry_run and idx >= DRY_RUN_CLICKS:
+                logger.info(
+                    f"Dry run: stopping before click {idx + 1}/{len(config.click_points)} "
+                    f"— that click would open the second window."
+                )
+                break
             real_x = win_x + offset_x * scale
             real_y = win_y + offset_y * scale
             logger.info(
@@ -539,7 +571,7 @@ def has_room_to_launch(schedule, moment) -> bool:
     return schedule.is_allowed(moment + datetime.timedelta(seconds=LAUNCH_TIMEOUT))
 
 
-def run_monitor_cycle(schedule, moment=None):
+def run_monitor_cycle(schedule, moment=None, dry_run=False):
     """Run exactly one monitor cycle.
 
     A cycle is the smallest repeatable unit of work the monitor performs. It
@@ -564,6 +596,13 @@ def run_monitor_cycle(schedule, moment=None):
     ``moment`` is the local clock reading used by the gate. When it is
     ``None`` the current time is read here; the schedule checker itself never
     reads the clock.
+
+    In a dry run (``dry_run=True``) the cycle runs the screen fix, closes a
+    running Primary Window for a fresh start (returning ``None`` so the next
+    cycle relaunches it), and on a fresh start runs the setup up to the second
+    click only. A finished rehearsal returns ``"rehearsed"``; a closed
+    schedule gate returns ``"blocked"``. Normal operation always returns
+    ``None``.
     """
     global _last_scale_factor
 
@@ -577,7 +616,7 @@ def run_monitor_cycle(schedule, moment=None):
             kill_telegram()
         else:
             logger.debug("Outside the allowed period; Telegram is not running.")
-        return
+        return "blocked" if dry_run else None
 
     # Launch guard: near the end of an Allowed Period, wait quietly rather than
     # launch Telegram only to shut it down seconds later. Only the launch (with
@@ -620,9 +659,16 @@ def run_monitor_cycle(schedule, moment=None):
             return
 
         # 2. Automate Telegram window (resize, clicks)
-        if not perform_telegram_actions():
+        if not perform_telegram_actions(dry_run=dry_run):
             logger.error("Failed to complete Telegram actions. Re-checking in next cycle.")
             return
+
+        if dry_run:
+            logger.info(
+                "Dry run: rehearsal finished — the first two clicks were performed; "
+                "stopping before the third click and skipping all second-window work."
+            )
+            return "rehearsed"
 
         # 3. Setup Second Window
         if not setup_second_window():
@@ -634,6 +680,15 @@ def run_monitor_cycle(schedule, moment=None):
         logger.info("Setup sequence completed successfully. Entering monitoring mode.")
 
     else:
+        if dry_run:
+            # A rehearsal needs a fresh start (the clicks only run then);
+            # close the running Primary Window and try again next cycle.
+            logger.info(
+                "Dry run: Telegram is running; closing it for a fresh rehearsal."
+            )
+            kill_telegram()
+            return
+
         # Telegram IS running. Now we must verify the second window is also present.
         # If it's missing, re-run the Click Sequence up to the retry limit.
         windows = gw.getWindowsWithTitle(config.second_window_title)
@@ -661,10 +716,51 @@ def run_monitor_cycle(schedule, moment=None):
                     logger.warning("Failed to setup second window after click retry.")
 
 
+def run_dry_run(schedule):
+    """Run the rehearsal until it is done, then stop with a summary.
+
+    One rehearsal per run: the screen fix runs for real, Telegram is closed
+    first when already running, then launched and resized, and the first two
+    clicks are performed for real. The third click (the one that opens the
+    Target Window) and every second-window action are skipped. Outside the
+    allowed hours nothing is rehearsed. Telegram is left running.
+    """
+    logger.info(
+        "Dry run: real actions until the second click; the third click and all "
+        "second-window work are skipped."
+    )
+
+    while True:
+        outcome = run_monitor_cycle(schedule, dry_run=True)
+
+        if outcome == "rehearsed":
+            logger.info(
+                "Dry run complete: Telegram was launched and resized and the first "
+                "two clicks were performed. Telegram is left running; the third "
+                "click and the second window were skipped on purpose."
+            )
+            return
+
+        if outcome == "blocked":
+            logger.info(
+                "Dry run: outside the allowed period; nothing was rehearsed."
+            )
+            return
+
+        time.sleep(MONITOR_INTERVAL)
+
+
 def main():
     logger.info("Starting Telegram Monitor Service...")
     schedule = validate_schedule_at_startup()
     set_dpi_awareness()
+
+    if dry_run_requested(sys.argv[1:]):
+        try:
+            run_dry_run(schedule)
+        except KeyboardInterrupt:
+            logger.info("Dry run stopped by user.")
+        return
 
     while True:
         try:

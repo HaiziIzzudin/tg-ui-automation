@@ -10,6 +10,7 @@ A specialized Windows Python utility that keeps Telegram and a target secondary 
 - **Click Retry Ladder**: If the secondary window disappears while Telegram is still running, the click sequence is retried up to a configurable limit before recovery.
 - **Advanced Error Recovery**: If the retry ladder is exhausted or the secondary window is not found, the script kills Telegram and waits a configurable cooldown before retrying.
 - **Resolution & Rotation Enforcement**: Checks the screen resolution and rotation every cycle and fixes them automatically — the screen is turned to Rotation 0 (horizontal) first, the resolution is set there, then the screen is turned to the configured rotation (via `rotate-screen` and the bundled `SetResolution.exe`).
+- **Dry Run (`--dry-run`)**: Rehearsal mode — everything runs for real up to the second click, then the program stops itself with a summary; the third click and all secondary-window work are skipped.
 - **Display Scaling Compensation**: All configured sizes and coordinates are measured in 100% scaling pixels and converted to real pixels at runtime (see "About pixel targeting").
 - **Secure Configuration**: Uses a `.env` file for sensitive window titles and all tunable settings.
 - **Time Ranges (Schedule)**: Optionally limit when Telegram runs to day/time ranges defined in a `schedule.json` file (see "Schedule" below).
@@ -42,6 +43,19 @@ Run the tests with:
 ```bash
 pytest
 ```
+
+## Dry run (`--dry-run`)
+A rehearsal mode to watch the automator work without the second-window part:
+
+```bash
+python main.py --dry-run
+```
+
+- The screen check runs for real — the same turn-to-horizontal, set-size, turn-back fix as a normal run.
+- If Telegram is already running it is closed first, then launched fresh, resized, and the first two clicks of the Click Sequence are performed for real.
+- The third click is skipped on purpose — it is the click that opens the secondary window — and no secondary-window work, click retry, or recovery ever runs.
+- When the rehearsal finishes the program stops itself with a summary; Telegram is left open for inspection.
+- Outside the allowed hours nothing is rehearsed and the program stops with a message. (It behaves exactly like a normal run there: any running Telegram is closed.)
 
 ## Schedule (`schedule.json`)
 The automator normally runs 24/7. Optionally, place a `schedule.json` file next to the app to restrict when Telegram runs. If the file is **absent**, the automator behaves exactly as always (24/7).
