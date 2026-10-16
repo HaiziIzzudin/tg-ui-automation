@@ -9,7 +9,7 @@ A specialized Windows Python utility that keeps Telegram and a target secondary 
 - **Persistent Monitoring**: Continuously checks if Telegram is running and restarts the setup sequence if it crashes or closes.
 - **Click Retry Ladder**: If the secondary window disappears while Telegram is still running, the click sequence is retried up to a configurable limit before recovery.
 - **Advanced Error Recovery**: If the retry ladder is exhausted or the secondary window is not found, the script kills Telegram and waits a configurable cooldown before retrying.
-- **Resolution & Rotation Enforcement**: Checks the screen resolution and rotation every cycle and fixes them automatically (via `rotate-screen` and the bundled `SetResolution.exe`).
+- **Resolution & Rotation Enforcement**: Checks the screen resolution and rotation every cycle and fixes them automatically — the screen is turned to Rotation 0 (horizontal) first, the resolution is set there, then the screen is turned to the configured rotation (via `rotate-screen` and the bundled `SetResolution.exe`).
 - **Display Scaling Compensation**: All configured sizes and coordinates are measured in 100% scaling pixels and converted to real pixels at runtime (see "About pixel targeting").
 - **Secure Configuration**: Uses a `.env` file for sensitive window titles and all tunable settings.
 - **Time Ranges (Schedule)**: Optionally limit when Telegram runs to day/time ranges defined in a `schedule.json` file (see "Schedule" below).
@@ -94,7 +94,7 @@ The script logs the scale factor and the real pixel positions it clicks, so you 
 ## How it Works
 1. **Schedule Gate** (optional): If `schedule.json` exists and the current time is outside all allowed ranges, stops Telegram (if running), skips all other work this cycle (no screen enforcement), and waits for the next range. Everything below is skipped while suspended.
 2. **Detection**: Checks the Windows process list for `Telegram.exe`.
-3. **Screen Guard**: Every cycle, compares actual rotation and resolution against `SCREEN_ROTATION` / `SCREEN_RESOLUTION` and fixes mismatches (retries with read-back before giving up until the next cycle).
+3. **Screen Guard**: Every cycle, compares actual rotation and resolution against `SCREEN_ROTATION` / `SCREEN_RESOLUTION`. When either is off, it fixes both in one pass — turn the screen to Rotation 0 (horizontal), set the resolution there, then turn the screen to the configured rotation. Each move is verified by reading the screen back and retried up to two times. If the first turn fails, the resolution step is skipped that cycle (the resolution is never set on a sideways screen); if the resolution step fails, the screen still finishes at the configured rotation; whatever is still off is retried next cycle.
 4. **Setup**: Launches Telegram, resizes it to 800x600, and clicks the configured `CLICK_POINTS` inside.
 5. **Adjustment**: Moves and resizes the secondary window specified in your `.env` (or maximizes it).
 6. **Monitoring**: Stays active:
