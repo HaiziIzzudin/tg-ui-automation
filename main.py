@@ -342,92 +342,179 @@ def setup_second_window() -> bool:
         logger.error(f"Error adjusting secondary window: {e}")
         return False
 
-def ensure_correct_rotation():
-    """Check if primary screen rotation matches configured value, if not, fix it.
+# Settle waits and retry budget for each screen-fix move, in today's order of
+# magnitude: about a second after a turn, about two after the size call.
+SCREEN_FIX_SETTLE_TURN_SECONDS = 1
+SCREEN_FIX_SETTLE_SIZE_SECONDS = 2
+SCREEN_FIX_MAX_ATTEMPTS = 2
 
-    Uses the rotatescreen library (not SetResolution.exe) to enforce rotation.
-    Retries up to 2 times on mismatch; on final failure logs a warning and
-    lets the monitor loop continue (self-heals next cycle).
+
+def _attempt_screen_move(action, verify, settle_seconds, description) -> bool:
+    """Run one screen move with verify-and-retry; True once verified.
+
+    At most two attempts. Each attempt runs ``action``, waits
+    ``settle_seconds`` for the screen to settle, then calls ``verify``; a
+    verification that returns True ends the move early. An exception from the
+    action or from the verification only fails that attempt — it is logged
+    and the next attempt runs. Never raises.
     """
-    expected_rotation = config.screen_rotation
-    display = rotatescreen.get_primary_display()
-    current = display.current_orientation
+    for attempt in range(1, SCREEN_FIX_MAX_ATTEMPTS + 1):
+        try:
+            action()
+        except Exception as e:
+            logger.debug(
+                f"Attempt {attempt}/{SCREEN_FIX_MAX_ATTEMPTS} of "
+                f"{description} failed: {e}"
+            )
 
-    if current == expected_rotation:
-        logger.debug(f"Screen rotation is correct ({current} deg).")
+        time.sleep(settle_seconds)
+
+        try:
+            if verify():
+                return True
+        except Exception as e:
+            logger.debug(
+                f"Read-back after attempt {attempt}/{SCREEN_FIX_MAX_ATTEMPTS} "
+                f"of {description} failed: {e}"
+            )
+
+    return False
+
+
+def ensure_correct_screen(expected_size, expected_rotation, display, set_screen_size, read_screen_size) -> None:
+    """Check the primary screen's Rotation and size and fix them when off.
+
+    The whole screen fix lives here. It reads the current Rotation and the
+    current size; when both already match the configuration it returns at
+    once without touching the screen (no flicker), logging at debug level
+    only. When either is off it warns and runs three moves in this fixed
+    order:
+
+    1. turn the screen to Rotation 0 (always issued, even as a no-op),
+    2. set the configured size through the size tool — size only, never an
+       orientation flag — while the screen is at Rotation 0,
+    3. turn the screen to the configured Rotation (always issued).
+
+    Every move gets at most two attempts; after each attempt the screen is
+    read back and a match ends the move early. A failed first turn stops the
+    fix for this cycle: the size is never set on a sideways screen. A failed
+    size move still lets the final turn run, so the screen is never left
+    sideways. Nothing raises out of this function — the process never exits.
+
+    ``expected_size`` is the configured ``(width, height)`` exactly as
+    written. It is compared with the OS-reported size with width and height
+    swapped when ``expected_rotation`` is 90 or 270 (the OS reports the
+    rotated size); the swap is comparison-only — the size is always *set*
+    from the configured pair as written, at Rotation 0.
+    """
+    expected_width, expected_height = expected_size
+
+    # Read the current state. When the screen cannot be read, leave it alone.
+    try:
+        current_rotation = display.current_orientation
+        current_width, current_height = read_screen_size()
+    except Exception as e:
+        logger.warning(
+            f"Could not read the current screen state: {e}. "
+            f"Skipping the screen check this cycle."
+        )
         return
 
-    max_retries = 2
-    for attempt in range(1, max_retries + 1):
-        logger.warning(
-            f"Rotation mismatch: current {current} deg, expected {expected_rotation} deg. "
-            f"Rotating (attempt {attempt}/{max_retries})..."
+    # The OS reports the size rotated with the screen at 90 and 270, so the
+    # expected size is swapped for comparison only.
+    if expected_rotation in (90, 270):
+        expected_screen_size = (expected_height, expected_width)
+    else:
+        expected_screen_size = (expected_width, expected_height)
+
+    rotation_correct = current_rotation == expected_rotation
+    size_correct = (current_width, current_height) == expected_screen_size
+
+    if rotation_correct and size_correct:
+        logger.debug(
+            f"Screen is correct (rotation {current_rotation} deg, "
+            f"size {current_width}x{current_height})."
         )
-        display.rotate_to(expected_rotation)
-        time.sleep(1)
+        return
 
-        # Read back actual orientation
-        current = display.current_orientation
-        if current == expected_rotation:
-            logger.info(f"Rotation corrected to {expected_rotation} deg.")
-            return
+    if not rotation_correct:
+        logger.warning(
+            f"Rotation mismatch: current {current_rotation} deg, "
+            f"expected {expected_rotation} deg. Fixing..."
+        )
+    if not size_correct:
+        logger.warning(
+            f"Resolution mismatch: current {current_width}x{current_height}, "
+            f"expected {expected_screen_size[0]}x{expected_screen_size[1]} "
+            f"(rotation {expected_rotation}). Fixing..."
+        )
 
-    logger.warning(
-        f"Rotation still {current} deg after {max_retries} retries; "
-        f"expected {expected_rotation} deg. Will retry next cycle."
+    # Move 1: turn to Rotation 0. Issued even when already there, so every fix
+    # takes the same known-good path and the size is never set sideways.
+    if _attempt_screen_move(
+        lambda: display.rotate_to(0),
+        lambda: display.current_orientation == 0,
+        SCREEN_FIX_SETTLE_TURN_SECONDS,
+        "turning the screen to Rotation 0",
+    ):
+        logger.info("Rotation corrected to 0 deg.")
+    else:
+        logger.warning(
+            "Could not turn the screen to Rotation 0; skipping the screen "
+            "fix this cycle. Will retry next cycle."
+        )
+        return
+
+    # Move 2: set the configured size while at Rotation 0. Size only — never
+    # an orientation flag. A failure here still lets the final turn run.
+    if _attempt_screen_move(
+        lambda: set_screen_size(expected_width, expected_height),
+        lambda: read_screen_size() == (expected_width, expected_height),
+        SCREEN_FIX_SETTLE_SIZE_SECONDS,
+        f"setting the Resolution to {expected_width}x{expected_height}",
+    ):
+        logger.info(f"Resolution corrected to {expected_width}x{expected_height}.")
+    else:
+        logger.warning(
+            f"Resolution still not {expected_width}x{expected_height} after "
+            f"{SCREEN_FIX_MAX_ATTEMPTS} attempts; will retry next cycle."
+        )
+
+    # Move 3: turn to the configured Rotation. A failure leaves the next cycle
+    # to retry; nothing raises.
+    if _attempt_screen_move(
+        lambda: display.rotate_to(expected_rotation),
+        lambda: display.current_orientation == expected_rotation,
+        SCREEN_FIX_SETTLE_TURN_SECONDS,
+        f"turning the screen to Rotation {expected_rotation}",
+    ):
+        logger.info(f"Rotation corrected to {expected_rotation} deg.")
+    else:
+        logger.warning(
+            f"Rotation still not {expected_rotation} deg after "
+            f"{SCREEN_FIX_MAX_ATTEMPTS} attempts; will retry next cycle."
+        )
+
+
+def set_screen_size(width, height):
+    """Set the primary screen's size through the bundled resolution tool.
+
+    Runs SetResolution.exe exactly as before: no prompt, and size only —
+    never an orientation flag (the tool's orientation option is broken
+    upstream; Rotation is handled separately through the rotation library).
+    May raise on failure; the caller treats that as a failed attempt.
+    """
+    exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SetResolution.exe")
+    subprocess.run(
+        ['powershell', f'& "{exe_path}" SET -w {width} -h {height} -noprompt'],
+        check=True,
     )
 
 
-def ensure_correct_resolution():
-    """Check if current resolution matches configured values, if not, fix it.
-
-    Reads back actual dimensions after the exe call and retries once on
-    mismatch. On final failure logs a warning and lets the monitor loop
-    continue (self-heals next cycle).
-    """
+def read_screen_size():
+    """Return the OS-reported primary screen size as ``(width, height)``."""
     user32 = ctypes.windll.user32
-    width = user32.GetSystemMetrics(0)
-    height = user32.GetSystemMetrics(1)
-
-    expected_width, expected_height = config.get_expected_resolution()
-    rotation = config.screen_rotation
-    if width != expected_width or height != expected_height:
-        logger.warning(
-            f"Resolution mismatch detected: {width}x{height} (rotation {rotation}). "
-            f"Expected {expected_width}x{expected_height}. Fixing..."
-        )
-        exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SetResolution.exe")
-
-        for attempt in range(2):
-            try:
-                subprocess.run(
-                    ['powershell', f'& "{exe_path}" SET -w {expected_width} -h {expected_height} -noprompt'],
-                    check=True,
-                )
-                logger.info("Resolution change command sent.")
-                time.sleep(2)
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to change resolution: {e}")
-                break
-
-            # Read back actual resolution
-            width = user32.GetSystemMetrics(0)
-            height = user32.GetSystemMetrics(1)
-            if width == expected_width and height == expected_height:
-                logger.info(f"Resolution corrected to {expected_width}x{expected_height}.")
-                return
-
-            logger.debug(
-                f"Resolution still {width}x{height} after attempt {attempt + 1}; "
-                f"expected {expected_width}x{expected_height}."
-            )
-
-        logger.warning(
-            f"Resolution mismatch persists ({width}x{height} vs "
-            f"{expected_width}x{expected_height}). Will retry next cycle."
-        )
-    else:
-        logger.debug(f"Screen resolution is correct ({expected_width}x{expected_height}, rotation {rotation}).")
+    return (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
 
 # ==============================================================================
 # MAIN LOOP
@@ -512,9 +599,14 @@ def run_monitor_cycle(schedule, moment=None):
         logger.info(f"Scale Factor: {config.scale_factor}")
         _last_scale_factor = config.scale_factor
 
-    # Always ensure rotation first, then resolution
-    ensure_correct_rotation()
-    ensure_correct_resolution()
+    # Fix the screen (Rotation and Resolution) before any window work.
+    ensure_correct_screen(
+        config.screen_resolution,
+        config.screen_rotation,
+        rotatescreen.get_primary_display(),
+        set_screen_size,
+        read_screen_size,
+    )
 
     if telegram_running is None:
         telegram_running = is_telegram_running()
