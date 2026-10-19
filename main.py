@@ -3,6 +3,7 @@ import sys
 import time
 import datetime
 import subprocess
+import shutil
 import logging
 import pyautogui
 import pygetwindow as gw
@@ -12,6 +13,12 @@ import rotatescreen
 from dotenv import load_dotenv
 from config import Config
 from schedule import SCHEDULE_FILENAME, ScheduleError, load_schedule
+from recorder import (
+    Recorder,
+    RecorderSettings,
+    classify_free_space,
+    ffmpeg_available,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -549,6 +556,218 @@ def read_screen_size():
     return (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
 
 # ==============================================================================
+# RECORDING
+# ==============================================================================
+# Recording lives inside the automator: one recorder child, driven from the
+# monitor cycle. It is independent of the windows — Recovery, Click Retry, and
+# the screen fix never touch it. Recording faults are logged and never fail the
+# window job.
+
+# The one recorder child, kept at module level so it survives across monitor
+# cycles. It is created on first use through :func:`get_recorder`, so tests can
+# replace the accessor (or this module variable) with a fake instead of
+# spawning a real recorder program.
+_recorder = None
+
+# Disk guard memory: whether a Disk Stop is in force, and the last free-space
+# level seen, so the "low disk" warning is logged once per crossing into
+# ``warn`` rather than every cycle.
+_recording_disk_latched = False
+_recording_disk_level = None
+
+
+def get_recorder(settings) -> Recorder:
+    """Return the module-level recorder, creating it on first use.
+
+    The caller supplies the already-resolved settings the first time; later
+    calls reuse the same recorder. Tests replace this function (or
+    ``_recorder``) with a fake so no recorder program is ever spawned.
+    """
+    global _recorder
+    if _recorder is None:
+        _recorder = Recorder(settings)
+    return _recorder
+
+
+def resolve_recordings_dir() -> str:
+    """Return the configured Clips folder as an absolute path.
+
+    This is a thin accessor: the value is already absolute and validated when
+    the settings load (a relative or empty value there falls back to the
+    default), so it is returned exactly as configured — the program never
+    joins a relative value onto its own folder.
+    """
+    return config.recordings_dir
+
+
+def _build_recorder_settings(folder) -> RecorderSettings:
+    """Collect the recording values into the recorder's settings object."""
+    return RecorderSettings(
+        stream_url=config.record_stream_url,
+        output_dir=folder,
+        clip_seconds=config.record_clip_seconds,
+        reconnect_seconds=config.record_reconnect_seconds,
+        ffmpeg_path=config.record_ffmpeg_path,
+    )
+
+
+def _nearest_existing_folder(folder) -> str:
+    """Return *folder*, or its nearest existing ancestor when it is missing."""
+    current = os.path.abspath(folder)
+    while not os.path.exists(current):
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return current
+
+
+def _free_space_bytes(folder) -> int:
+    """Return the free space in bytes on the drive that holds *folder*.
+
+    The Clips folder may not exist yet, so the nearest existing parent is used
+    for the disk reading.
+    """
+    return shutil.disk_usage(_nearest_existing_folder(folder)).free
+
+
+def _free_gb(free_bytes: int) -> str:
+    """Format a byte count as gigabytes for a log line."""
+    return f"{free_bytes / (1024 ** 3):.1f}"
+
+
+def _should_record(moment, schedule) -> bool:
+    """Return True when the Recording Mode and the Schedule want recording now.
+
+    ``off`` never records; ``long-living`` always does and ignores the Schedule
+    entirely (so it keeps recording while the automator is in Suspend); and
+    ``follow-schedule`` records when there is no Schedule file or when the
+    moment is inside an Allowed Period.
+    """
+    mode = config.recording_mode
+    if mode == "long-living":
+        return True
+    if mode == "follow-schedule":
+        return schedule is None or schedule.is_allowed(moment)
+    return False
+
+
+def update_recording(moment, schedule, dry_run=False) -> None:
+    """Bring recording in line with the mode, the Schedule, and free space.
+
+    Called at the very top of every monitor cycle, before the schedule gate and
+    before any early return, so Long-living keeps recording during Suspend.
+
+    A dry run returns at once and never touches the recorder: the rehearsal is
+    window work only.
+
+    While recording is wanted the disk guard reads free space on the Clips
+    folder drive, warns once per crossing into ``warn``, and stops the recorder
+    once when it enters ``stop``. A Disk Stop suppresses starts and reconnects
+    until free space is back at or above the warning level, then resumes with
+    one log line. No Clip is ever deleted.
+    """
+    global _recorder, _recording_disk_latched, _recording_disk_level
+
+    if dry_run:
+        return
+
+    try:
+        if not _should_record(moment, schedule):
+            # Mode off, or Follow-schedule outside its Allowed Period:
+            # Recording Stop when it was running, and nothing started.
+            if _recorder is not None and _recorder.is_running():
+                _recorder.stop()
+            _recorder = None
+            _recording_disk_latched = False
+            _recording_disk_level = None
+            return
+
+        folder = resolve_recordings_dir()
+        settings = _build_recorder_settings(folder)
+        free_bytes = _free_space_bytes(folder)
+        warn_bytes = int(config.record_disk_warn_gb * 1024 ** 3)
+        stop_bytes = int(config.record_disk_stop_gb * 1024 ** 3)
+        level = classify_free_space(free_bytes, warn_bytes, stop_bytes)
+
+        if _recording_disk_latched:
+            if level != "ok":
+                # Still below the warning level: keep suppressing starts and
+                # reconnects until the space is back.
+                return
+            logger.info("Free space is back at the warning level; resuming recording.")
+            _recording_disk_latched = False
+        elif level == "stop":
+            _recording_disk_latched = True
+            _recording_disk_level = level
+            logger.error(
+                f"Disk space is critically low ({_free_gb(free_bytes)} GB free on "
+                f"'{folder}'); stopping recording so the disk never fills. "
+                f"No Clip is deleted."
+            )
+            if _recorder is not None:
+                _recorder.stop_for_disk()
+                _recorder = None
+            return
+        elif level == "warn" and _recording_disk_level != "warn":
+            logger.warning(
+                f"Low disk space: only {_free_gb(free_bytes)} GB free on "
+                f"'{folder}'. Recording stops below "
+                f"{config.record_disk_stop_gb:g} GB."
+            )
+
+        _recording_disk_level = level
+
+        if _recorder is None:
+            # First start (or a retry after a failed start): build the recorder
+            # and start it. A failed start is logged and retried next cycle.
+            recorder = get_recorder(settings)
+            if not recorder.start(moment):
+                _recorder = None
+        else:
+            # Already in the recording phase: let the recorder reconnect a
+            # dropped stream after the configured wait.
+            _recorder.supervise(moment)
+    except Exception as error:
+        logger.error(f"Unexpected problem while updating recording: {error}")
+
+
+def log_recording_startup() -> None:
+    """Log the Recording Mode once and name any reason recording cannot run.
+
+    A missing stream address or a missing recorder program logs an error. The
+    automator never exits or refuses to start; the window job keeps running.
+    """
+    mode = config.recording_mode
+    logger.info(f"Recording mode: {mode}.")
+    if mode == "off":
+        return
+
+    if not config.record_stream_url:
+        logger.error(
+            f"Recording mode is '{mode}' but RECORD_STREAM_URL is empty; "
+            f"recording cannot start. The window job keeps running."
+        )
+
+    settings = _build_recorder_settings(resolve_recordings_dir())
+    if not ffmpeg_available(settings):
+        logger.error(
+            f"Recording mode is '{mode}' but the recorder program "
+            f"'{config.record_ffmpeg_path}' was not found; recording cannot "
+            f"start. The window job keeps running."
+        )
+
+
+def stop_recording() -> None:
+    """Stop the recorder gracefully when the user stops the automator.
+
+    Called where the main loop notices Ctrl+C, so no orphan recorder child
+    survives the exit.
+    """
+    if _recorder is not None:
+        _recorder.stop()
+
+# ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 
@@ -579,7 +798,12 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
     never sleeps ``MONITOR_INTERVAL`` and never exits the process; the outer
     :func:`main` loop sleeps between cycles.
 
-    The schedule gate sits at the very top of the cycle, before the scale
+    Recording is updated at the very top, before the schedule gate and every
+    early return, so Long-living keeps recording while the automator is in
+    Suspend. The recording decision is independent of the windows and of any
+    window work that follows.
+
+    The schedule gate sits just below the recording update, before the scale
     refresh, the screen guard, and any window work:
 
     * inside an Allowed Period → behave exactly as before,
@@ -608,6 +832,10 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
 
     if moment is None:
         moment = datetime.datetime.now()
+
+    # Recording comes first, before the schedule gate and every early return:
+    # Long-living must keep recording while the automator is in Suspend.
+    update_recording(moment, schedule, dry_run)
 
     # Schedule gate: Suspend (and Shutdown when needed) outside allowed hours.
     if schedule is not None and not schedule.is_allowed(moment):
@@ -754,6 +982,7 @@ def main():
     logger.info("Starting Telegram Monitor Service...")
     schedule = validate_schedule_at_startup()
     set_dpi_awareness()
+    log_recording_startup()
 
     if dry_run_requested(sys.argv[1:]):
         try:
@@ -773,6 +1002,7 @@ def main():
 
         except KeyboardInterrupt:
             logger.info("Monitor Service stopped by user.")
+            stop_recording()
             break
         except Exception as e:
             logger.error(f"Unexpected error in main loop: {e}")

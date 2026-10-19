@@ -14,6 +14,7 @@ A specialized Windows Python utility that keeps Telegram and a target secondary 
 - **Display Scaling Compensation**: All configured sizes and coordinates are measured in 100% scaling pixels and converted to real pixels at runtime (see "About pixel targeting").
 - **Secure Configuration**: Uses a `.env` file for sensitive window titles and all tunable settings.
 - **Time Ranges (Schedule)**: Optionally limit when Telegram runs to day/time ranges defined in a `schedule.json` file (see "Schedule" below).
+- **Stream Recording (optional)**: Records a live stream straight to disk while the automator runs — plus around the clock for the "long-living" mode or only during the schedule's hours (see "Recording" below).
 
 ## Prerequisites
 - Windows OS
@@ -81,6 +82,38 @@ Notes:
 - Deliberately skipping the full setup near the end of a range: when Telegram isn't already running and the range ends within the launch window (about 7 seconds), the automator waits instead of launching Telegram just to close it seconds later.
 - Use `example.schedule.json` as a starting point.
 
+## Recording (optional)
+The automator can record a live stream to disk while it looks after the windows. Recording runs on the same computer as the automator and is independent of Telegram and the target window: recovery, click retry, shutdown, and the screen fix never interrupt it. One stream address, one folder for the recorded files.
+
+One setting picks the mode. There are two modes plus off:
+
+| `RECORD_MODE` | What it does |
+|---|---|
+| `off` (default) | Never records. |
+| `long-living` | Records day and night — including outside the allowed hours and while the automator is suspended — and ignores the schedule. |
+| `follow-schedule` | Records only during the allowed hours in `schedule.json` (with no schedule file, everything is allowed, so it records 24/7). It closes the current file when a period ends and starts a fresh one when the next period begins. |
+
+The eight settings (all optional, see `example.env`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `RECORD_MODE` | `off` | `off`, `long-living`, or `follow-schedule`. Anything else warns and falls back to `off`. |
+| `RECORD_STREAM_URL` | *(empty)* | The stream address to record. Empty means recording cannot start. |
+| `RECORDINGS_DIR` | the `Recordings` folder next to the program | Folder for the records. **Must be an absolute path** — a drive path like `D:\Recordings` or a UNC path like `\\server\share\clips`. A relative or empty value warns and falls back to the default. Created when missing. |
+| `RECORD_CLIP_SECONDS` | `7200` | Length of one recorded file, in seconds. |
+| `RECORD_RECONNECT_SECONDS` | `5` | Wait after the recorder stops unexpectedly before it reconnects. |
+| `RECORD_FFMPEG_PATH` | `ffmpeg` | The recorder program. A bare name is looked up on the system path; a full path is used as given. |
+| `RECORD_DISK_WARN_GB` | `10` | Free space, in gigabytes, below which a warning is logged once per crossing. |
+| `RECORD_DISK_STOP_GB` | `2` | Free space, in gigabytes, below which recording stops. Must be below the warning level. |
+
+**Where recordings land.** Each recorded file covers one stretch of the stream and is named by the moment it started, e.g. `20261019_140000.mp4`, inside `RECORDINGS_DIR`.
+
+**Recording never stops the window job.** A missing recorder program, a wrong or empty stream address, or a failed start is only logged loudly and retried; the automator keeps running. If the disk gets critically low the automator warns, stops recording so the disk never fills, and starts again once space is back — it never deletes a file.
+
+The dry run (`--dry-run`) never records: a rehearsal is window work only.
+
+The old `ffmpeg_cmd.ps1` PowerShell script stays in the repository as a manual backup only. It is not supported and is not used by the automator.
+
 ## Configuration (`.env`)
 All settings are optional and fall back to sensible defaults (see `example.env`):
 
@@ -95,6 +128,8 @@ All settings are optional and fall back to sensible defaults (see `example.env`)
 | `KILL_COOLDOWN_SECONDS` | `60` | Seconds to wait after killing Telegram before retrying. |
 | `SECOND_WINDOW_RETRY_LIMIT` | `3` | Click retry attempts before recovery kicks in. |
 | `CLICK_RETRY_INTERVAL` | `3.0` | Seconds between click retry attempts. |
+
+The eight recording settings are listed in "Recording" above.
 
 ## About pixel targeting
 Every size and coordinate in `.env` (`CLICK_POINTS`, `SECOND_WINDOW_SIZE`, `SECOND_WINDOW_POS`, and the built-in Telegram window size) is measured in **100% scaling pixels**.

@@ -69,3 +69,41 @@ _Avoid_: Exit, quit, close the app (they wrongly suggest the automator stops)
 **Suspend**:
 The quiet state while outside any Allowed Period: no Primary Window running, no window work, only clock checks.
 _Avoid_: Sleep mode, idle
+
+## Recording
+
+**Recording**:
+Capturing the live stream straight from the network and writing it to disk, done by the automator on its own computer. Independent of the Primary Window and the Target Window: it survives Recovery and Click Retry.
+_Avoid_: Taping, capture session
+
+**Clip**:
+One recorded file covering a stretch of stream. A Clip is closed properly so it plays on its own, and is named by the moment it started.
+_Avoid_: Segment, chunk, part, video file
+
+**Recording Mode**:
+The setting deciding when recording happens. Exactly one of three values: off, Long-living, or Follow-schedule.
+_Avoid_: Record setting, capture mode
+
+**Long-living**:
+A Recording Mode where recording runs day and night and never consults the Schedule, even while the automator Suspend.
+_Avoid_: 24/7 mode, continuous mode
+
+**Follow-schedule**:
+A Recording Mode where recording is allowed only inside an Allowed Period. When the period ends the recording stops and closes its Clip; at the next period start a fresh Clip begins.
+_Avoid_: Scheduled mode, timetable mode
+
+**Recording Stop**:
+Closing the current Clip and waiting, because the Allowed Period ended under Follow-schedule. Distinct from Shutdown, which concerns the Primary Window only.
+_Avoid_: Recording shutdown
+
+**Recording Resume**:
+Starting a fresh Clip at the start of the next Allowed Period under Follow-schedule.
+_Avoid_: Recording restart
+
+**Reconnection**:
+The automatic restart of the recording after the stream drops or the recorder stops. It always begins a fresh Clip and repeats until recording is stopped for good.
+_Avoid_: Reconnect loop, retry
+
+**Disk Stop**:
+Stopping recording because the disk is critically low on space, after a warning. No Clip is ever deleted for the user.
+_Avoid_: Cleanup, eviction

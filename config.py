@@ -7,6 +7,15 @@ logger = logging.getLogger(__name__)
 
 _VALID_ROTATIONS = (0, 90, 180, 270)
 
+_VALID_RECORD_MODES = ("off", "long-living", "follow-schedule")
+
+# Default Clips folder: the absolute path to "Recordings" next to the program.
+# Computed once at load time so the default is unambiguous and never joined
+# onto anything later.
+DEFAULT_RECORDINGS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "Recordings"
+)
+
 
 def clamp_rotation(value: int) -> int:
     """Return *value* if it is a valid rotation, otherwise 0."""
@@ -89,6 +98,53 @@ def parse_float(value: str, default: float) -> float:
         return default
 
 
+def parse_record_mode(value: str, default: str = "off") -> str:
+    """Parse a recording mode, returning default if it is not a known mode."""
+    try:
+        mode = value.strip().lower()
+    except AttributeError as e:
+        logger.warning(f"Invalid recording mode '{value}': {e}. Using default {default}.")
+        return default
+    if mode not in _VALID_RECORD_MODES:
+        accepted = ", ".join(f"'{m}'" for m in _VALID_RECORD_MODES)
+        logger.warning(
+            f"Invalid recording mode '{value}': accepted values are {accepted}. "
+            f"Using default {default}."
+        )
+        return default
+    return mode
+
+
+def parse_text(value: str, default: str) -> str:
+    """Trim *value*, returning default if it is empty after trimming."""
+    text = value.strip()
+    if not text:
+        logger.warning(f"Empty value. Using default '{default}'.")
+        return default
+    return text
+
+
+def parse_recordings_dir(value: str, default: str) -> str:
+    """Return the Clips folder, which must be an absolute path.
+
+    An absolute value — a drive path such as ``D:\\Clips`` or a UNC path such
+    as ``\\\\server\\share\\clips`` — is kept exactly as given. A relative
+    value, or one that is empty after trimming, warns once naming the setting
+    and falls back to *default* (itself an absolute path).
+    """
+    try:
+        folder = value.strip()
+    except AttributeError:
+        folder = ""
+    if folder and os.path.isabs(folder):
+        return folder
+    logger.warning(
+        f"RECORDINGS_DIR must be an absolute path (got '{value}'). "
+        f"Using default '{default}'."
+    )
+    return default
+
+
 def get_scale_factor() -> float:
     """Read the current system DPI scale factor (1.0 = 96 DPI, 1.5 = 144 DPI, etc.).
 
@@ -155,6 +211,43 @@ class Config:
             os.getenv("CLICK_RETRY_INTERVAL", "3.0"),
             3.0,
         )
+        self.recording_mode = parse_record_mode(
+            os.getenv("RECORD_MODE", "off"),
+            "off",
+        )
+        self.record_stream_url = os.getenv("RECORD_STREAM_URL", "").strip()
+        self.recordings_dir = parse_recordings_dir(
+            os.getenv("RECORDINGS_DIR", DEFAULT_RECORDINGS_DIR),
+            DEFAULT_RECORDINGS_DIR,
+        )
+        self.record_clip_seconds = parse_int(
+            os.getenv("RECORD_CLIP_SECONDS", "7200"),
+            7200,
+        )
+        self.record_reconnect_seconds = parse_float(
+            os.getenv("RECORD_RECONNECT_SECONDS", "5"),
+            5.0,
+        )
+        self.record_ffmpeg_path = parse_text(
+            os.getenv("RECORD_FFMPEG_PATH", "ffmpeg"),
+            "ffmpeg",
+        )
+        self.record_disk_warn_gb = parse_float(
+            os.getenv("RECORD_DISK_WARN_GB", "10"),
+            10.0,
+        )
+        self.record_disk_stop_gb = parse_float(
+            os.getenv("RECORD_DISK_STOP_GB", "2"),
+            2.0,
+        )
+        if self.record_disk_stop_gb >= self.record_disk_warn_gb:
+            logger.warning(
+                f"RECORD_DISK_STOP_GB ({self.record_disk_stop_gb}) is not below "
+                f"RECORD_DISK_WARN_GB ({self.record_disk_warn_gb}); using the "
+                f"defaults 10 and 2."
+            )
+            self.record_disk_warn_gb = 10.0
+            self.record_disk_stop_gb = 2.0
         self.scale_factor: float = get_scale_factor()
 
     def refresh_scale_factor(self) -> float:

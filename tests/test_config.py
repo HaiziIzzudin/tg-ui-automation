@@ -6,6 +6,8 @@ from pathlib import Path
 # Add the parent directory to sys.path so we can import config
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import config as config_module
+
 from config import (
     parse_resolution,
     parse_position,
@@ -13,7 +15,11 @@ from config import (
     parse_int,
     parse_float,
     parse_maximized,
+    parse_record_mode,
+    parse_text,
+    parse_recordings_dir,
     Config,
+    DEFAULT_RECORDINGS_DIR,
     clamp_rotation,
 )
 
@@ -132,6 +138,14 @@ class TestConfig:
         monkeypatch.delenv("KILL_COOLDOWN_SECONDS", raising=False)
         monkeypatch.delenv("SECOND_WINDOW_RETRY_LIMIT", raising=False)
         monkeypatch.delenv("CLICK_RETRY_INTERVAL", raising=False)
+        monkeypatch.delenv("RECORD_MODE", raising=False)
+        monkeypatch.delenv("RECORD_STREAM_URL", raising=False)
+        monkeypatch.delenv("RECORDINGS_DIR", raising=False)
+        monkeypatch.delenv("RECORD_CLIP_SECONDS", raising=False)
+        monkeypatch.delenv("RECORD_RECONNECT_SECONDS", raising=False)
+        monkeypatch.delenv("RECORD_FFMPEG_PATH", raising=False)
+        monkeypatch.delenv("RECORD_DISK_WARN_GB", raising=False)
+        monkeypatch.delenv("RECORD_DISK_STOP_GB", raising=False)
 
         config = Config()
         assert config.second_window_title == "secondWindowTitle"
@@ -143,6 +157,15 @@ class TestConfig:
         assert config.kill_cooldown_seconds == 60
         assert config.second_window_retry_limit == 3
         assert config.click_retry_interval == 3.0
+        assert config.recording_mode == "off"
+        assert config.record_stream_url == ""
+        assert config.recordings_dir == DEFAULT_RECORDINGS_DIR
+        assert os.path.isabs(config.recordings_dir)
+        assert config.record_clip_seconds == 7200
+        assert config.record_reconnect_seconds == 5.0
+        assert config.record_ffmpeg_path == "ffmpeg"
+        assert config.record_disk_warn_gb == 10
+        assert config.record_disk_stop_gb == 2
 
     def test_custom_values(self, monkeypatch):
         monkeypatch.setenv("SECOND_WINDOW_TITLE", "MyWindow")
@@ -154,6 +177,14 @@ class TestConfig:
         monkeypatch.setenv("KILL_COOLDOWN_SECONDS", "30")
         monkeypatch.setenv("SECOND_WINDOW_RETRY_LIMIT", "5")
         monkeypatch.setenv("CLICK_RETRY_INTERVAL", "1.5")
+        monkeypatch.setenv("RECORD_MODE", "follow-schedule")
+        monkeypatch.setenv("RECORD_STREAM_URL", "rtmp://example.test/live")
+        monkeypatch.setenv("RECORDINGS_DIR", "D:\\Clips")
+        monkeypatch.setenv("RECORD_CLIP_SECONDS", "1800")
+        monkeypatch.setenv("RECORD_RECONNECT_SECONDS", "12.5")
+        monkeypatch.setenv("RECORD_FFMPEG_PATH", "C:\\tools\\ffmpeg.exe")
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", "20")
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", "5")
 
         config = Config()
         assert config.second_window_title == "MyWindow"
@@ -165,6 +196,14 @@ class TestConfig:
         assert config.kill_cooldown_seconds == 30
         assert config.second_window_retry_limit == 5
         assert config.click_retry_interval == 1.5
+        assert config.recording_mode == "follow-schedule"
+        assert config.record_stream_url == "rtmp://example.test/live"
+        assert config.recordings_dir == "D:\\Clips"
+        assert config.record_clip_seconds == 1800
+        assert config.record_reconnect_seconds == 12.5
+        assert config.record_ffmpeg_path == "C:\\tools\\ffmpeg.exe"
+        assert config.record_disk_warn_gb == 20
+        assert config.record_disk_stop_gb == 5
 
     def test_malformed_values_fallback(self, monkeypatch):
         monkeypatch.setenv("SCREEN_RESOLUTION", "invalid")
@@ -175,6 +214,13 @@ class TestConfig:
         monkeypatch.setenv("KILL_COOLDOWN_SECONDS", "abc")
         monkeypatch.setenv("SECOND_WINDOW_RETRY_LIMIT", "abc")
         monkeypatch.setenv("CLICK_RETRY_INTERVAL", "abc")
+        monkeypatch.setenv("RECORD_MODE", "sometimes")
+        monkeypatch.setenv("RECORDINGS_DIR", "   ")
+        monkeypatch.setenv("RECORD_CLIP_SECONDS", "abc")
+        monkeypatch.setenv("RECORD_RECONNECT_SECONDS", "-2")
+        monkeypatch.setenv("RECORD_FFMPEG_PATH", "  ")
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", "abc")
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", "-1")
 
         config = Config()
         assert config.screen_resolution == (1920, 1080)  # default
@@ -185,6 +231,181 @@ class TestConfig:
         assert config.kill_cooldown_seconds == 60  # default
         assert config.second_window_retry_limit == 3  # default
         assert config.click_retry_interval == 3.0  # default
+        assert config.recording_mode == "off"  # default
+        assert config.recordings_dir == DEFAULT_RECORDINGS_DIR  # default
+        assert config.record_clip_seconds == 7200  # default
+        assert config.record_reconnect_seconds == 5.0  # default
+        assert config.record_ffmpeg_path == "ffmpeg"  # default
+        assert config.record_disk_warn_gb == 10  # default
+        assert config.record_disk_stop_gb == 2  # default
+
+    def test_zero_clip_and_reconnect_fall_back(self, monkeypatch):
+        monkeypatch.setenv("RECORD_CLIP_SECONDS", "0")
+        monkeypatch.setenv("RECORD_RECONNECT_SECONDS", "0")
+
+        config = Config()
+        assert config.record_clip_seconds == 7200
+        assert config.record_reconnect_seconds == 5.0
+
+
+class TestRecordDiskThresholds:
+    """The two disk levels are plain gigabytes with a cross-check."""
+
+    def test_defaults_are_ten_and_two(self, monkeypatch):
+        monkeypatch.delenv("RECORD_DISK_WARN_GB", raising=False)
+        monkeypatch.delenv("RECORD_DISK_STOP_GB", raising=False)
+
+        config = Config()
+        assert config.record_disk_warn_gb == 10
+        assert config.record_disk_stop_gb == 2
+
+    def test_fractional_gigabytes_are_allowed(self, monkeypatch):
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", "0.5")
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", "0.25")
+
+        config = Config()
+        assert config.record_disk_warn_gb == 0.5
+        assert config.record_disk_stop_gb == 0.25
+
+    @pytest.mark.parametrize("bad", ["abc", "0", "-5", "   "])
+    def test_bad_warn_value_warns_and_falls_back(self, monkeypatch, caplog, bad):
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", bad)
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", "2")
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+        assert config.record_disk_warn_gb == 10
+        assert config.record_disk_stop_gb == 2
+        assert any("RECORD_DISK_WARN_GB" in r.message or "Invalid float" in r.message
+                   for r in caplog.records)
+
+    @pytest.mark.parametrize("bad", ["abc", "0", "-5", "   "])
+    def test_bad_stop_value_warns_and_falls_back(self, monkeypatch, bad):
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", "10")
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", bad)
+
+        config = Config()
+        assert config.record_disk_warn_gb == 10
+        assert config.record_disk_stop_gb == 2
+
+    def test_stop_below_warn_is_kept(self, monkeypatch):
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", "30")
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", "7")
+
+        config = Config()
+        assert config.record_disk_warn_gb == 30
+        assert config.record_disk_stop_gb == 7
+
+    def test_stop_equal_to_warn_warns_once_and_uses_both_defaults(self, monkeypatch, caplog):
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", "4")
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", "4")
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+        assert config.record_disk_warn_gb == 10
+        assert config.record_disk_stop_gb == 2
+        warnings = [r for r in caplog.records if "RECORD_DISK_STOP_GB" in r.message]
+        assert len(warnings) == 1
+
+    def test_stop_above_warn_warns_once_and_uses_both_defaults(self, monkeypatch, caplog):
+        monkeypatch.setenv("RECORD_DISK_WARN_GB", "2")
+        monkeypatch.setenv("RECORD_DISK_STOP_GB", "10")
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+        assert config.record_disk_warn_gb == 10
+        assert config.record_disk_stop_gb == 2
+        assert any("RECORD_DISK_STOP_GB" in r.message for r in caplog.records)
+
+
+class TestRecordMode:
+    def test_accepts_known_modes(self):
+        assert parse_record_mode("off", "off") == "off"
+        assert parse_record_mode("long-living", "off") == "long-living"
+        assert parse_record_mode("follow-schedule", "off") == "follow-schedule"
+
+    def test_case_and_whitespace_insensitive(self):
+        assert parse_record_mode("  LONG-LIVING  ", "off") == "long-living"
+        assert parse_record_mode("Follow-Schedule", "off") == "follow-schedule"
+        assert parse_record_mode("\tOff\n", "off") == "off"
+
+    def test_unknown_mode_returns_default(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert parse_record_mode("sometimes", "off") == "off"
+        assert "sometimes" in caplog.text
+        assert "long-living" in caplog.text
+
+    def test_empty_mode_returns_default(self):
+        assert parse_record_mode("", "off") == "off"
+        assert parse_record_mode("   ", "off") == "off"
+
+    def test_mode_from_config_is_normalised(self, monkeypatch):
+        monkeypatch.setenv("RECORD_MODE", "  Follow-Schedule ")
+        assert Config().recording_mode == "follow-schedule"
+
+
+class TestParseText:
+    def test_keeps_trimmed_value(self):
+        assert parse_text("  Recordings  ", "fallback") == "Recordings"
+
+    def test_empty_returns_default(self):
+        assert parse_text("", "fallback") == "fallback"
+        assert parse_text("   ", "fallback") == "fallback"
+
+
+class TestParseRecordingsDir:
+    """The Clips folder must be absolute; relative or empty falls back."""
+
+    def test_default_is_absolute_next_to_the_program(self):
+        assert os.path.isabs(DEFAULT_RECORDINGS_DIR)
+        expected = os.path.join(
+            os.path.dirname(os.path.abspath(config_module.__file__)), "Recordings"
+        )
+        assert DEFAULT_RECORDINGS_DIR == expected
+
+    def test_absolute_drive_path_is_kept(self):
+        assert parse_recordings_dir(r"D:\Clips", DEFAULT_RECORDINGS_DIR) == r"D:\Clips"
+
+    def test_unc_path_is_kept_unchanged(self):
+        unc = r"\\server\share\clips"
+        assert parse_recordings_dir(unc, DEFAULT_RECORDINGS_DIR) == unc
+
+    def test_absolute_value_is_trimmed_but_not_otherwise_changed(self):
+        assert parse_recordings_dir(r"  D:\Clips  ", DEFAULT_RECORDINGS_DIR) == r"D:\Clips"
+
+    def test_relative_value_warns_once_and_falls_back(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = parse_recordings_dir("Recordings", DEFAULT_RECORDINGS_DIR)
+
+        assert result == DEFAULT_RECORDINGS_DIR
+        warnings = [r for r in caplog.records if "RECORDINGS_DIR" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "absolute" in warnings[0].getMessage()
+
+    def test_empty_value_warns_once_and_falls_back(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = parse_recordings_dir("   ", DEFAULT_RECORDINGS_DIR)
+
+        assert result == DEFAULT_RECORDINGS_DIR
+        warnings = [r for r in caplog.records if "RECORDINGS_DIR" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "absolute" in warnings[0].getMessage()
+
+    def test_config_default_is_the_absolute_program_folder(self, monkeypatch):
+        monkeypatch.delenv("RECORDINGS_DIR", raising=False)
+        cfg = Config()
+        assert cfg.recordings_dir == DEFAULT_RECORDINGS_DIR
+
+    def test_config_relative_value_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("RECORDINGS_DIR", "Recordings")
+        with caplog.at_level("WARNING"):
+            cfg = Config()
+        assert cfg.recordings_dir == DEFAULT_RECORDINGS_DIR
+        assert any("RECORDINGS_DIR" in r.getMessage() for r in caplog.records)
+
+    def test_config_unc_value_is_kept(self, monkeypatch):
+        monkeypatch.setenv("RECORDINGS_DIR", r"\\server\share\clips")
+        assert Config().recordings_dir == r"\\server\share\clips"
 
 
 class TestClampRotation:
