@@ -93,7 +93,7 @@ One setting picks the mode. There are two modes plus off:
 | `long-living` | Records day and night — including outside the allowed hours and while the automator is suspended — and ignores the schedule. |
 | `follow-schedule` | Records only during the allowed hours in `schedule.json` (with no schedule file, everything is allowed, so it records 24/7). It closes the current file when a period ends and starts a fresh one when the next period begins. |
 
-The eight settings (all optional, see `example.env`):
+The nine settings (all optional, see `example.env`):
 
 | Variable | Default | Description |
 |---|---|---|
@@ -105,10 +105,13 @@ The eight settings (all optional, see `example.env`):
 | `RECORD_FFMPEG_PATH` | `ffmpeg` | The recorder program. A bare name is looked up on the system path; a full path is used as given. |
 | `RECORD_DISK_WARN_GB` | `10` | Free space, in gigabytes, below which a warning is logged once per crossing. |
 | `RECORD_DISK_STOP_GB` | `2` | Free space, in gigabytes, below which recording stops. Must be below the warning level. |
+| `LOG_LEVEL` | `INFO` | How much is written to the log: `DEBUG`, `INFO`, `WARNING`, or `ERROR` (case-insensitive). Anything else warns and falls back to `INFO`. Set `DEBUG` to see the recorder's own words. |
 
 **Where recordings land.** Each recorded file covers one stretch of the stream and is named by the moment it started, e.g. `20261019_140000.mp4`, inside `RECORDINGS_DIR`.
 
-The log names the file currently being written, once each time a new one starts.
+**Where it starts.** Before recording begins — on the first start and on every reconnection — the automator looks at the stream's playlist and finds the newest segment that really exists, then tells the recorder to begin just behind it. This matters because the playlist advertises far more history than the server keeps, so the older entries answer "not found". If the stream cannot be read in time, recording still starts, using a safe default position, and says so in the log.
+
+The log names the file currently being written, once each time a new one starts. The recorder's own words are read quietly in the background: the useful few lines (the stream it opened, its details, the output it created, and its ready line) are written at normal level, everything else — the per-segment chatter — only when `LOG_LEVEL` is `DEBUG`. If the recorder stops on its own, its last twenty lines are logged as a warning so the failure explains itself. A normal stop never dumps those lines.
 
 **Recording never stops the window job.** A missing recorder program, a wrong or empty stream address, or a failed start is only logged loudly and retried; the automator keeps running. If the disk gets critically low the automator warns, stops recording so the disk never fills, and starts again once space is back — it never deletes a file.
 
@@ -131,7 +134,7 @@ All settings are optional and fall back to sensible defaults (see `example.env`)
 | `SECOND_WINDOW_RETRY_LIMIT` | `3` | Click retry attempts before recovery kicks in. |
 | `CLICK_RETRY_INTERVAL` | `3.0` | Seconds between click retry attempts. |
 
-The eight recording settings are listed in "Recording" above.
+The nine recording settings are listed in "Recording" above.
 
 ## About pixel targeting
 Every size and coordinate in `.env` (`CLICK_POINTS`, `SECOND_WINDOW_SIZE`, `SECOND_WINDOW_POS`, and the built-in Telegram window size) is measured in **100% scaling pixels**.

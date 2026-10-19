@@ -17,6 +17,7 @@ from config import (
     parse_maximized,
     parse_record_mode,
     parse_text,
+    parse_log_level,
     parse_recordings_dir,
     Config,
     DEFAULT_RECORDINGS_DIR,
@@ -146,6 +147,7 @@ class TestConfig:
         monkeypatch.delenv("RECORD_FFMPEG_PATH", raising=False)
         monkeypatch.delenv("RECORD_DISK_WARN_GB", raising=False)
         monkeypatch.delenv("RECORD_DISK_STOP_GB", raising=False)
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
 
         config = Config()
         assert config.second_window_title == "secondWindowTitle"
@@ -166,8 +168,7 @@ class TestConfig:
         assert config.record_ffmpeg_path == "ffmpeg"
         assert config.record_disk_warn_gb == 10
         assert config.record_disk_stop_gb == 2
-
-    def test_custom_values(self, monkeypatch):
+        assert config.log_level == "INFO"
         monkeypatch.setenv("SECOND_WINDOW_TITLE", "MyWindow")
         monkeypatch.setenv("SCREEN_RESOLUTION", "1080x1920")
         monkeypatch.setenv("SCREEN_ROTATION", "90")
@@ -185,6 +186,7 @@ class TestConfig:
         monkeypatch.setenv("RECORD_FFMPEG_PATH", "C:\\tools\\ffmpeg.exe")
         monkeypatch.setenv("RECORD_DISK_WARN_GB", "20")
         monkeypatch.setenv("RECORD_DISK_STOP_GB", "5")
+        monkeypatch.setenv("LOG_LEVEL", "debug")
 
         config = Config()
         assert config.second_window_title == "MyWindow"
@@ -204,6 +206,7 @@ class TestConfig:
         assert config.record_ffmpeg_path == "C:\\tools\\ffmpeg.exe"
         assert config.record_disk_warn_gb == 20
         assert config.record_disk_stop_gb == 5
+        assert config.log_level == "DEBUG"
 
     def test_malformed_values_fallback(self, monkeypatch):
         monkeypatch.setenv("SCREEN_RESOLUTION", "invalid")
@@ -221,6 +224,7 @@ class TestConfig:
         monkeypatch.setenv("RECORD_FFMPEG_PATH", "  ")
         monkeypatch.setenv("RECORD_DISK_WARN_GB", "abc")
         monkeypatch.setenv("RECORD_DISK_STOP_GB", "-1")
+        monkeypatch.setenv("LOG_LEVEL", "loud")
 
         config = Config()
         assert config.screen_resolution == (1920, 1080)  # default
@@ -238,6 +242,7 @@ class TestConfig:
         assert config.record_ffmpeg_path == "ffmpeg"  # default
         assert config.record_disk_warn_gb == 10  # default
         assert config.record_disk_stop_gb == 2  # default
+        assert config.log_level == "INFO"  # default
 
     def test_zero_clip_and_reconnect_fall_back(self, monkeypatch):
         monkeypatch.setenv("RECORD_CLIP_SECONDS", "0")
@@ -351,6 +356,45 @@ class TestParseText:
     def test_empty_returns_default(self):
         assert parse_text("", "fallback") == "fallback"
         assert parse_text("   ", "fallback") == "fallback"
+
+
+class TestParseLogLevel:
+    """LOG_LEVEL accepts four names, case-insensitively, and warns otherwise."""
+
+    def test_accepts_the_four_names(self):
+        assert parse_log_level("DEBUG", "INFO") == "DEBUG"
+        assert parse_log_level("INFO", "INFO") == "INFO"
+        assert parse_log_level("WARNING", "INFO") == "WARNING"
+        assert parse_log_level("ERROR", "INFO") == "ERROR"
+
+    def test_is_case_and_whitespace_insensitive(self):
+        assert parse_log_level("debug", "INFO") == "DEBUG"
+        assert parse_log_level("  Warning  ", "INFO") == "WARNING"
+        assert parse_log_level("\terror\n", "INFO") == "ERROR"
+
+    def test_default_is_info(self):
+        assert parse_log_level("DEBUG") == "DEBUG"
+        assert parse_log_level("INFO") == "INFO"
+
+    @pytest.mark.parametrize("bad", ["verbose", "", "   ", "TRACE", "critical"])
+    def test_nonsense_warns_once_and_falls_back(self, caplog, bad):
+        with caplog.at_level("WARNING"):
+            result = parse_log_level(bad, "INFO")
+        assert result == "INFO"
+        warnings = [r for r in caplog.records if "log level" in r.getMessage().lower()]
+        assert len(warnings) == 1
+
+    def test_config_reads_and_normalises_the_setting(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "debug")
+        assert Config().log_level == "DEBUG"
+
+    def test_config_nonsense_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("LOG_LEVEL", "verbose")
+        with caplog.at_level("WARNING"):
+            cfg = Config()
+        assert cfg.log_level == "INFO"
+        assert any("LOG_LEVEL" in r.getMessage() or "log level" in r.getMessage().lower()
+                   for r in caplog.records)
 
 
 class TestParseRecordingsDir:

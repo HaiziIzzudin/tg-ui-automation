@@ -100,6 +100,10 @@ _Avoid_: Recording shutdown
 Starting a fresh Clip at the start of the next Allowed Period under Follow-schedule.
 _Avoid_: Recording restart
 
+**Stream Check**:
+The automator's look at the stream's playlist before recording starts, to find the newest segment that really exists, so recording always begins on real data. Runs again on every reconnection.
+_Avoid_: Probe, availability test
+
 **Current Clip**:
 The Clip the recorder is writing right now. The automator announces its name once, in the log, each time it changes.
 _Avoid_: Open file, active recording

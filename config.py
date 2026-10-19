@@ -9,6 +9,8 @@ _VALID_ROTATIONS = (0, 90, 180, 270)
 
 _VALID_RECORD_MODES = ("off", "long-living", "follow-schedule")
 
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
 # Default Clips folder: the absolute path to "Recordings" next to the program.
 # Computed once at load time so the default is unambiguous and never joined
 # onto anything later.
@@ -124,6 +126,27 @@ def parse_text(value: str, default: str) -> str:
     return text
 
 
+def parse_log_level(value: str, default: str = "INFO") -> str:
+    """Parse a logging level name, case-insensitively.
+
+    Accepts ``DEBUG``, ``INFO``, ``WARNING``, and ``ERROR``. Anything else
+    warns once naming the setting and falls back to *default*.
+    """
+    try:
+        level = value.strip().upper()
+    except AttributeError as e:
+        logger.warning(f"Invalid log level '{value}': {e}. Using default {default}.")
+        return default
+    if level not in _VALID_LOG_LEVELS:
+        accepted = ", ".join(_VALID_LOG_LEVELS)
+        logger.warning(
+            f"Invalid log level '{value}': accepted values are {accepted}. "
+            f"Using default {default}."
+        )
+        return default
+    return level
+
+
 def parse_recordings_dir(value: str, default: str) -> str:
     """Return the Clips folder, which must be an absolute path.
 
@@ -210,6 +233,10 @@ class Config:
         self.click_retry_interval = parse_float(
             os.getenv("CLICK_RETRY_INTERVAL", "3.0"),
             3.0,
+        )
+        self.log_level = parse_log_level(
+            os.getenv("LOG_LEVEL", "INFO"),
+            "INFO",
         )
         self.recording_mode = parse_record_mode(
             os.getenv("RECORD_MODE", "off"),

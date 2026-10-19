@@ -7,19 +7,25 @@ command it builds mirrors the old script argument for argument, so Clips keep
 their timestamped names and their clip length.
 
 The module never imports ``main``, ``config``, or ``schedule``, and it never
-reads the clock. Exactly one child process is owned here; its output goes
-nowhere the caller must drain, so nothing the recorder does can block the
-automator. The Clips folder alone is watched, once per monitor cycle, to name
-the Clip being written in the log.
+reads the clock. Exactly one child process is owned here; its own words are
+read on a background thread, so nothing the recorder writes can block the
+automator. Before every start a Stream Check looks at the stream's playlist
+and picks the newest segment that really exists. The Clips folder alone is
+watched, once per monitor cycle, to name the Clip being written in the log.
 """
 
+import collections
 import datetime
 import logging
 import os
 import shutil
 import subprocess
+import threading
+import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,44 @@ TERMINATE_TIMEOUT_SECONDS = 3.0
 # Clip name pattern, unchanged from the old script.
 CLIP_NAME_PATTERN = "%Y%m%d_%H%M%S.mp4"
 
+# Where the recorder program starts reading the stream's playlist: three
+# entries back from the newest one. The playlist the stream publishes still
+# lists about eight hours of history, but the server has already deleted those
+# old entries, so every one of them answers "404 Not Found". Starting at the
+# oldest entry (index 0) therefore makes the recorder grind through thousands
+# of not-found errors, never reach live, and never write a Clip file at all.
+# A few steps back from the newest segment reach live at once and still leave
+# room for the segment being written right now; if the stream's retention ever
+# changes, this one value moves.
+LIVE_START_INDEX = -3
+
+# ---------------------------------------------------------------------------
+# Stream Check budget
+# ---------------------------------------------------------------------------
+# How far back from the newest segment the Stream Check will look for one that
+# really exists, how long one look may take, and how long the whole check may
+# take. The newest segment usually answers, so the normal case costs one look.
+STREAM_CHECK_MAX_LOOKBACK = 12
+STREAM_CHECK_REQUEST_TIMEOUT = 2.0
+STREAM_CHECK_TOTAL_TIMEOUT = 10.0
+
+# How many segments behind the working one the recorder is told to start, so a
+# segment that is listed but not yet written at the very edge cannot spoil it.
+STREAM_CHECK_CUSHION = 2
+
+# How many lines of the recorder child's own words are kept in memory, so an
+# unexpected exit can explain itself; only the tail is worth keeping.
+CHILD_TAIL_LINES = 20
+
+# How long the background reader is given to finish after an unexpected exit,
+# before its remembered tail is logged.
+CHILD_TAIL_JOIN_SECONDS = 0.5
+
+# Lines worth seeing without turning on debug: the stream it opened, the
+# stream details it reports, the output it created, and its ready line. Every
+# other line — the per-segment chatter — stays at debug.
+_CHILD_USEFUL_MARKERS = ("input #", "stream #", "output #", "press [q]")
+
 STATUS_STOPPED = "stopped"
 STATUS_RUNNING = "running"
 STATUS_WAITING = "waiting-to-retry"
@@ -45,6 +89,215 @@ STATUS_DISK_STOP = "disk-stop"
 # The automator's own folder, used as the child's working directory exactly as
 # the old script ran next to the Recordings folder.
 _START_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+
+
+class StreamCheckError(Exception):
+    """Raised inside the Stream Check when no usable segment could be found.
+
+    Never escapes :func:`choose_live_start_index`; it only carries the plain
+    reason to the warning that falls back to the default start.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Stream Check
+# ---------------------------------------------------------------------------
+
+def fetch_playlist_text(address: str, timeout: float) -> str:
+    """Fetch one playlist reply at *address* and return it as text.
+
+    This is the single place a network request is made. Tests replace this
+    function so the Stream Check can be exercised without a network.
+    """
+    with urllib.request.urlopen(address, timeout=timeout) as reply:
+        return reply.read().decode("utf-8", errors="replace")
+
+
+def _playlist_entries(text: str):
+    """Yield the non-comment, non-blank lines of a playlist, in order."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            yield line
+
+
+def _first_variant_address(master_text: str, master_address: str) -> Optional[str]:
+    """Return the first variant playlist address, resolved against the master.
+
+    Only a line that follows an ``#EXT-X-STREAM-INF`` tag counts as a variant;
+    a reply that is already a segment list has no such tag and gives None.
+    """
+    previous = ""
+    for raw in master_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            previous = line
+            continue
+        if previous.startswith("#EXT-X-STREAM-INF"):
+            return urllib.parse.urljoin(master_address, line)
+        previous = line
+    return None
+
+
+def _check_timeout(deadline: float) -> float:
+    """Return the per-request timeout, never more than the time left."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return 0.0
+    return min(STREAM_CHECK_REQUEST_TIMEOUT, remaining)
+
+
+def clamp_start_index(chosen: int, segment_count: int) -> int:
+    """Keep *chosen* off the oldest entry the playlist lists.
+
+    A negative position counts back from the newest segment, so the oldest
+    entry is ``-segment_count`` and the safe floor is ``-(segment_count - 1)``.
+    """
+    return max(chosen, -(segment_count - 1))
+
+
+def _find_live_start_index(stream_url: str) -> Tuple[int, int, int]:
+    """Look for the newest segment that really exists.
+
+    Returns ``(start_index, position, looks)``: the chosen position for the
+    recorder, how far back the working segment was (0 is the newest), and how
+    many looks it took. Raises :class:`StreamCheckError` when nothing answered
+    inside the budget.
+    """
+    deadline = time.monotonic() + STREAM_CHECK_TOTAL_TIMEOUT
+
+    master_text = fetch_playlist_text(stream_url, _check_timeout(deadline))
+    variant_address = _first_variant_address(master_text, stream_url)
+    if variant_address is None:
+        # Not a master playlist: the reply is already the segment list.
+        variant_text = master_text
+        variant_address = stream_url
+    else:
+        variant_text = fetch_playlist_text(variant_address, _check_timeout(deadline))
+
+    # Segments are relative addresses; resolving against the variant
+    # playlist's own address keeps the session token they carry valid.
+    segments = [
+        urllib.parse.urljoin(variant_address, line)
+        for line in _playlist_entries(variant_text)
+    ]
+    if not segments:
+        raise StreamCheckError("the playlist listed no segments.")
+
+    newest = len(segments) - 1
+    looks = min(STREAM_CHECK_MAX_LOOKBACK, len(segments))
+    for position in range(looks):
+        if deadline - time.monotonic() <= 0:
+            raise StreamCheckError(
+                f"time ran out after looking back {position} time(s)."
+            )
+        try:
+            fetch_playlist_text(segments[newest - position], _check_timeout(deadline))
+        except Exception as error:
+            logger.debug(
+                f"Stream Check: segment {position} back is not available "
+                f"(look {position + 1} of {looks}): {error}"
+            )
+            continue
+
+        chosen = clamp_start_index(
+            -(position + STREAM_CHECK_CUSHION), len(segments)
+        )
+        return chosen, position, position + 1
+
+    raise StreamCheckError(
+        f"no segment answered within the budget (looked back {looks} time(s))."
+    )
+
+
+def choose_live_start_index(stream_url: str) -> int:
+    """Return the start position the recorder should use, and explain it once.
+
+    Looks at the stream's playlist and finds the newest segment that really
+    exists, then tells the recorder to begin just behind it. One request on
+    the normal path. Nothing available, or any failure at all: the existing
+    default is used and a warning says what happened. This never raises and
+    never holds the caller longer than the total budget.
+    """
+    try:
+        chosen, position, looks = _find_live_start_index(stream_url)
+    except StreamCheckError as error:
+        logger.warning(
+            f"Stream Check: {error} Recording will start at the default "
+            f"position ({LIVE_START_INDEX})."
+        )
+        return LIVE_START_INDEX
+    except Exception as error:
+        logger.warning(
+            f"Stream Check: could not look at the stream ({error}); "
+            f"recording will start at the default position ({LIVE_START_INDEX})."
+        )
+        return LIVE_START_INDEX
+
+    if position == 0:
+        logger.info(
+            f"Stream Check: the live edge is there; recording starts "
+            f"{STREAM_CHECK_CUSHION} segments back (position {chosen}) after "
+            f"{looks} look(s)."
+        )
+    else:
+        logger.info(
+            f"Stream Check: the newest {position} segment(s) were missing; "
+            f"recording starts on the newest data it could find (position "
+            f"{chosen}) after {looks} look(s)."
+        )
+    return chosen
+
+
+# ---------------------------------------------------------------------------
+# The recorder child's own words
+# ---------------------------------------------------------------------------
+
+def is_useful_child_line(line: str) -> bool:
+    """Return True for the few recorder lines worth information level."""
+    lowered = line.lower()
+    return any(marker in lowered for marker in _CHILD_USEFUL_MARKERS)
+
+
+class ChildOutputReader(threading.Thread):
+    """Reads the recorder child's error stream on a daemon thread.
+
+    Every line is logged at debug; the few useful lines are also logged at
+    information. The last ``tail_size`` lines are remembered, so an unexpected
+    exit can log that tail at warning. Being a daemon, the reader can never
+    hold the automator open; a stream that misbehaves is only a debug note.
+    """
+
+    def __init__(self, stream, tail_size: int = CHILD_TAIL_LINES):
+        super().__init__(daemon=True)
+        self._stream = stream
+        self._tail = collections.deque(maxlen=tail_size)
+
+    def run(self) -> None:
+        try:
+            for raw in self._stream:
+                if isinstance(raw, bytes):
+                    line = raw.decode("utf-8", errors="replace")
+                else:
+                    line = str(raw)
+                line = line.rstrip("\r\n")
+                self._tail.append(line)
+                self._log(line)
+        except Exception as error:
+            logger.debug(f"Could not read the recorder's output: {error}")
+
+    def tail(self) -> List[str]:
+        """Return the remembered lines, oldest first."""
+        return list(self._tail)
+
+    @staticmethod
+    def _log(line: str) -> None:
+        if is_useful_child_line(line):
+            logger.info(line)
+        else:
+            logger.debug(line)
 
 
 @dataclass(frozen=True)
@@ -63,17 +316,24 @@ class RecorderSettings:
     ffmpeg_path: str
 
 
-def build_ffmpeg_command(settings: RecorderSettings) -> List[str]:
-    """Return the recorder argument list, mirroring ``ffmpeg_cmd.ps1`` exactly.
+def build_ffmpeg_command(
+    settings: RecorderSettings, start_index: int = LIVE_START_INDEX
+) -> List[str]:
+    """Return the recorder argument list, mirroring ``ffmpeg_cmd.ps1``.
 
-    The last argument is the timestamped Clip pattern: one new Clip every
-    ``clip_seconds``, named by the moment it started.
+    ``start_index`` is the playlist position chosen by the Stream Check; it
+    falls back to ``LIVE_START_INDEX`` so a plain call keeps working. The last
+    argument is the timestamped Clip pattern: one new Clip every
+    ``clip_seconds``, named by the moment it started. ``-nostats`` silences the
+    continuous progress lines; ``-nostdin`` is not used, because the graceful
+    quit writes the quit key to the child's input.
     """
     output_pattern = os.path.join(settings.output_dir, CLIP_NAME_PATTERN)
     return [
         settings.ffmpeg_path,
         "-hide_banner",
-        "-live_start_index", "0",
+        "-nostats",
+        "-live_start_index", str(start_index),
         "-i", settings.stream_url,
         "-c", "copy",
         "-bsf:a", "aac_adtstoasc",
@@ -131,6 +391,7 @@ class Recorder:
     def __init__(self, settings: RecorderSettings):
         self._settings = settings
         self._child = None
+        self._reader: Optional[ChildOutputReader] = None
         self._started_at: Optional[datetime.datetime] = None
         self._retry_at: Optional[datetime.datetime] = None
         self._disk_stop = False
@@ -179,13 +440,18 @@ class Recorder:
         # run and are never announced.
         self._clips_at_start = set(self._list_clip_names() or [])
 
-        command = build_ffmpeg_command(self._settings)
+        # Stream Check: pick the newest segment that really exists, on the
+        # first start and on every reconnection. It never raises and fell back
+        # to the default position when it could not tell.
+        start_index = choose_live_start_index(self._settings.stream_url)
+
+        command = build_ffmpeg_command(self._settings, start_index)
         try:
             child = subprocess.Popen(
                 command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 cwd=_START_DIRECTORY,
             )
         except Exception as error:
@@ -198,6 +464,7 @@ class Recorder:
 
         self._child = child
         self._started_at = moment
+        self._start_output_reader(child)
         logger.info(
             f"Recording started: a new Clip every {self._settings.clip_seconds} "
             f"seconds in '{self._settings.output_dir}'."
@@ -218,6 +485,8 @@ class Recorder:
         self._retry_at = None
         self._last_clip = None
         self._clips_at_start = set()
+        # A normal stop never dumps the child's last words; forget the reader.
+        self._reader = None
 
         child = self._child
         self._child = None
@@ -252,7 +521,9 @@ class Recorder:
         supplied *moment*. Before it elapses the recorder reports
         ``waiting-to-retry``. When it elapses a fresh Clip is started. A
         recorder that was never started is left alone, and a disk stop
-        suppresses reconnection until the caller starts again. Never blocks.
+        suppresses reconnection until the caller starts again. It never waits
+        on the network or the child, beyond a short bounded join used to
+        collect the child's last words when it has just exited.
 
         This is also the call the monitor cycle makes every cycle while
         recording, so the Current Clip is announced from here.
@@ -273,8 +544,12 @@ class Recorder:
         wait = self._settings.reconnect_seconds
 
         if self._retry_at is None:
-            exit_code = self._child.poll() if self._child is not None else None
+            child = self._child
+            exit_code = child.poll() if child is not None else None
             self._child = None
+            if child is not None:
+                # The child left on its own: its last words explain why.
+                self._dump_child_tail()
             self._retry_at = moment + datetime.timedelta(seconds=wait)
             if exit_code is None:
                 logger.warning(
@@ -334,6 +609,52 @@ class Recorder:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _start_output_reader(self, child) -> None:
+        """Read the child's error stream on a daemon thread.
+
+        A child without a readable stream (a fake, or a pipe that could not be
+        made) simply gets no reader. Any failure is a debug note: reading the
+        child's words must never disturb recording.
+        """
+        stream = getattr(child, "stderr", None)
+        if stream is None:
+            self._reader = None
+            return
+        try:
+            reader = ChildOutputReader(stream)
+            reader.start()
+        except Exception as error:
+            logger.debug(f"Could not read the recorder's output: {error}")
+            self._reader = None
+            return
+        self._reader = reader
+
+    def _dump_child_tail(self) -> None:
+        """Log the child's remembered last lines after an unexpected exit.
+
+        A brief, bounded join lets the reader finish the lines already in the
+        pipe. Nothing is logged when no reader ran or nothing was remembered.
+        """
+        reader = self._reader
+        self._reader = None
+        if reader is None:
+            return
+        try:
+            reader.join(timeout=CHILD_TAIL_JOIN_SECONDS)
+        except Exception as error:
+            logger.debug(f"Could not wait for the recorder's output reader: {error}")
+        try:
+            tail = reader.tail()
+        except Exception as error:
+            logger.debug(f"Could not read the recorder's remembered output: {error}")
+            return
+        if not tail:
+            return
+        logger.warning(
+            "Recorder output before it stopped on its own "
+            f"(last {len(tail)} line(s)):\n" + "\n".join(tail)
+        )
 
     def _announce_current_clip(self) -> None:
         """Log the newest Clip name once each time it changes.

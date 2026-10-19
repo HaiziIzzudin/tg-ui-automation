@@ -63,8 +63,19 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+
+def log_level_value() -> int:
+    """Return the logging level named by ``LOG_LEVEL``, defaulting to INFO.
+
+    ``LOG_LEVEL`` is already validated when the settings load (anything else
+    warns and falls back to ``INFO``); this only turns the name into the
+    number the logging setup needs.
+    """
+    return getattr(logging, config.log_level, logging.INFO)
+
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level_value(),
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler(log_file, encoding="utf-8"),
