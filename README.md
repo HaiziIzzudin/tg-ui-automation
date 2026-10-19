@@ -108,6 +108,8 @@ The eight settings (all optional, see `example.env`):
 
 **Where recordings land.** Each recorded file covers one stretch of the stream and is named by the moment it started, e.g. `20261019_140000.mp4`, inside `RECORDINGS_DIR`.
 
+The log names the file currently being written, once each time a new one starts.
+
 **Recording never stops the window job.** A missing recorder program, a wrong or empty stream address, or a failed start is only logged loudly and retried; the automator keeps running. If the disk gets critically low the automator warns, stops recording so the disk never fills, and starts again once space is back — it never deletes a file.
 
 The dry run (`--dry-run`) never records: a rehearsal is window work only.

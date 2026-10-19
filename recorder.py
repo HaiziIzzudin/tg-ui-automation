@@ -9,7 +9,8 @@ their timestamped names and their clip length.
 The module never imports ``main``, ``config``, or ``schedule``, and it never
 reads the clock. Exactly one child process is owned here; its output goes
 nowhere the caller must drain, so nothing the recorder does can block the
-automator.
+automator. The Clips folder alone is watched, once per monitor cycle, to name
+the Clip being written in the log.
 """
 
 import datetime
@@ -133,6 +134,11 @@ class Recorder:
         self._started_at: Optional[datetime.datetime] = None
         self._retry_at: Optional[datetime.datetime] = None
         self._disk_stop = False
+        # The Current Clip name already announced, and the file names that were
+        # in the Clips folder when this run started. The second set is what
+        # keeps leftovers from an earlier run out of the log.
+        self._last_clip: Optional[str] = None
+        self._clips_at_start = set()
 
     # ------------------------------------------------------------------
     # Process lifecycle
@@ -169,6 +175,10 @@ class Recorder:
             )
             return False
 
+        # Note what is already in the folder: those files belong to an earlier
+        # run and are never announced.
+        self._clips_at_start = set(self._list_clip_names() or [])
+
         command = build_ffmpeg_command(self._settings)
         try:
             child = subprocess.Popen(
@@ -201,9 +211,13 @@ class Recorder:
         open Clip is closed and playable, then terminated if it lingers, then
         killed. Always ends with no child. Returns whether a child was closed;
         a recorder that was never running returns False. This is the plain
-        stop (Recording Stop); it leaves the disk-stop latch alone.
+        stop (Recording Stop); it leaves the disk-stop latch alone. The
+        Current Clip name is forgotten, so the next start announces its own
+        file once more.
         """
         self._retry_at = None
+        self._last_clip = None
+        self._clips_at_start = set()
 
         child = self._child
         self._child = None
@@ -239,7 +253,12 @@ class Recorder:
         ``waiting-to-retry``. When it elapses a fresh Clip is started. A
         recorder that was never started is left alone, and a disk stop
         suppresses reconnection until the caller starts again. Never blocks.
+
+        This is also the call the monitor cycle makes every cycle while
+        recording, so the Current Clip is announced from here.
         """
+        self._announce_current_clip()
+
         if self._disk_stop:
             logger.debug("Recorder is stopped for low disk space; not reconnecting.")
             return
@@ -302,9 +321,73 @@ class Recorder:
             return STATUS_WAITING
         return STATUS_STOPPED
 
+    def current_clip(self) -> Optional[str]:
+        """Return the name of the Clip announced most recently, or None.
+
+        Nothing is returned while recording is stopped, so a caller can tell
+        "no Current Clip" from "the same Clip as last time".
+        """
+        if not self.is_running():
+            return None
+        return self._last_clip
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _announce_current_clip(self) -> None:
+        """Log the newest Clip name once each time it changes.
+
+        Called from ``supervise``, i.e. once per monitor cycle while
+        recording. Only a live child is considered, so a stopped or
+        reconnecting recorder announces nothing. Any failure here is a debug
+        note: watching the Clips folder must never disturb recording.
+        """
+        try:
+            if not self.is_running():
+                return
+
+            newest = self._newest_clip_name()
+            if newest is None or newest == self._last_clip:
+                return
+
+            self._last_clip = newest
+            logger.info(f"Recording the current Clip: '{newest}'.")
+        except Exception as error:
+            logger.debug(f"Could not check for the current Clip: {error}")
+
+    def _newest_clip_name(self) -> Optional[str]:
+        """Return the newest Clip name written by this run, or None.
+
+        Files that were already in the folder when the run started are
+        skipped, so only a name appearing afterwards counts. A folder that
+        cannot be listed is a debug note and gives None; it never raises.
+        """
+        names = self._list_clip_names()
+        if names is None:
+            return None
+
+        fresh = [name for name in names if name not in self._clips_at_start]
+        if not fresh:
+            return None
+        # Names are timestamps, so the largest name is the newest file. Any
+        # failure while picking it out is the caller's to swallow.
+        return max(fresh)
+
+    def _list_clip_names(self) -> Optional[List[str]]:
+        """Return the file names in the Clips folder, or None when unlistable.
+
+        A missing folder, a folder that is really a file, or a denied read is
+        a quiet debug note: the recorder keeps running either way.
+        """
+        try:
+            return os.listdir(self._settings.output_dir)
+        except OSError as error:
+            logger.debug(
+                f"Could not read the Clips folder "
+                f"'{self._settings.output_dir}': {error}"
+            )
+            return None
 
     def _shut_down(self, child) -> bool:
         """Quit, then terminate, then kill *child*. Each step is guarded."""

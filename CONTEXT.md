@@ -100,6 +100,10 @@ _Avoid_: Recording shutdown
 Starting a fresh Clip at the start of the next Allowed Period under Follow-schedule.
 _Avoid_: Recording restart
 
+**Current Clip**:
+The Clip the recorder is writing right now. The automator announces its name once, in the log, each time it changes.
+_Avoid_: Open file, active recording
+
 **Reconnection**:
 The automatic restart of the recording after the stream drops or the recorder stops. It always begins a fresh Clip and repeats until recording is stopped for good.
 _Avoid_: Reconnect loop, retry
