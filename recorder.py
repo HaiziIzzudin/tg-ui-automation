@@ -46,6 +46,12 @@ TERMINATE_TIMEOUT_SECONDS = 3.0
 # Clip name pattern, unchanged from the old script.
 CLIP_NAME_PATTERN = "%Y%m%d_%H%M%S.mp4"
 
+# The flags the file writer needs so a Clip is readable while it is still
+# being written, and stays readable if the process is killed. They must reach
+# the writer that the "one file per Clip" wrapper creates, which is what
+# ``-segment_format_options`` does; a plain ``-movflags`` is ignored there.
+SEGMENT_FORMAT_OPTIONS = "movflags=frag_keyframe+empty_moov"
+
 # Clip name pattern for a caller that leads the name with its own text. The
 # four-digit year becomes two digits here, because that is the shape the List
 # Recorder file names are specified with.
@@ -359,6 +365,13 @@ def build_ffmpeg_command(
     ``clip_seconds``, named by the moment it started. ``-nostats`` silences the
     continuous progress lines; ``-nostdin`` is not used, because the graceful
     quit writes the quit key to the child's input.
+
+    The fragment flags are handed to the file writer that the "one file per
+    Clip" wrapper creates, through ``-segment_format_options``. A plain
+    ``-movflags`` here goes to the wrapper, which has no such option: it is
+    silently ignored, the index is written only when the child closes the
+    file, and every Clip still open when the process is killed is unplayable.
+    Written this way each Clip plays while it grows and after a hard stop.
     """
     output_pattern = os.path.join(settings.output_dir, _clip_name_pattern(settings))
     return [
@@ -372,7 +385,8 @@ def build_ffmpeg_command(
         "-f", "segment",
         "-segment_time", str(settings.clip_seconds),
         "-reset_timestamps", "1",
-        "-movflags", "frag_keyframe+empty_moov",
+        "-segment_format", "mp4",
+        "-segment_format_options", SEGMENT_FORMAT_OPTIONS,
         "-strftime", "1",
         output_pattern,
     ]

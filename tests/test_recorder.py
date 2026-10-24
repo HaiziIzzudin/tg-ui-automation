@@ -27,6 +27,7 @@ from recorder import (
     LIVE_START_INDEX,
     MIN_FREE_BYTES_STOP,
     MIN_FREE_BYTES_WARN,
+    SEGMENT_FORMAT_OPTIONS,
     STATUS_GAVE_UP,
     STREAM_CHECK_CUSHION,
     STREAM_CHECK_MAX_LOOKBACK,
@@ -253,10 +254,33 @@ class TestBuildFfmpegCommand:
             "-f", "segment",
             "-segment_time", "7200",
             "-reset_timestamps", "1",
-            "-movflags", "frag_keyframe+empty_moov",
+            "-segment_format", "mp4",
+            "-segment_format_options", SEGMENT_FORMAT_OPTIONS,
             "-strftime", "1",
             os.path.join(str(tmp_path), CLIP_NAME_PATTERN),
         ]
+
+    def test_the_fragment_flags_reach_the_file_writer_not_the_wrapper(self, tmp_path):
+        # A plain -movflags goes to the "one file per Clip" wrapper, which has
+        # no such option: it is silently ignored, the index is written only on
+        # a clean close, and every Clip killed or still open cannot be played.
+        # The flags must travel to the writer through -segment_format_options.
+        command = build_ffmpeg_command(make_settings(tmp_path))
+        assert "-movflags" not in command
+        options = command[command.index("-segment_format_options") + 1]
+        assert "frag_keyframe" in options and "empty_moov" in options
+        assert command[command.index("-segment_format") + 1] == "mp4"
+
+    def test_the_spawned_command_carries_the_writer_options(self, tmp_path, monkeypatch):
+        # Same protection seen from the outside: the command the recorder
+        # actually spawns carries the writer options.
+        spawner = install_spawner(monkeypatch, FakeChild())
+        rec = Recorder(make_settings(tmp_path))
+        rec.start(at())
+
+        spawned = spawner.calls[0]["command"]
+        assert "-segment_format_options" in spawned
+        assert "-movflags" not in spawned
 
     def test_clip_length_is_written_from_the_settings(self, tmp_path):
         command = build_ffmpeg_command(make_settings(tmp_path, clip_seconds=900))

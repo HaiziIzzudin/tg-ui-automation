@@ -17,7 +17,8 @@ while ($true) {
     ffmpeg -hide_banner -live_start_index $liveStartIndex -i $streamUrl `
         -c copy -bsf:a aac_adtstoasc `
         -f segment -segment_time 7200 -reset_timestamps 1 `
-        -movflags frag_keyframe+empty_moov -strftime 1 `
+        -segment_format mp4 -segment_format_options movflags=frag_keyframe+empty_moov `
+        -strftime 1 `
         "Recordings/%Y%m%d_%H%M%S.mp4"
 
     $exitCode = $LASTEXITCODE
