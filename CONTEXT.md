@@ -77,7 +77,7 @@ Capturing the live stream straight from the network and writing it to disk, done
 _Avoid_: Taping, capture session
 
 **Clip**:
-One recorded file covering a stretch of stream. A Clip is closed properly so it plays on its own, and is named by the moment it started.
+One recorded file covering a stretch of stream. A Clip is closed properly so it plays on its own, and is named by the moment it started. A Clip belonging to a List Recording also begins with the person's Clean Name and uses a two-digit year.
 _Avoid_: Segment, chunk, part, video file
 
 **Recording Mode**:
@@ -109,9 +109,44 @@ The Clip the recorder is writing right now. The automator announces its name onc
 _Avoid_: Open file, active recording
 
 **Reconnection**:
-The automatic restart of the recording after the stream drops or the recorder stops. It always begins a fresh Clip and repeats until recording is stopped for good.
+The automatic restart of the recording after the stream drops or the recorder stops. It always begins a fresh Clip and repeats until recording is stopped for good — except for a List Recording, which stops after the Retry Limit.
 _Avoid_: Reconnect loop, retry
 
 **Disk Stop**:
 Stopping recording because the disk is critically low on space, after a warning. No Clip is ever deleted for the user.
 _Avoid_: Cleanup, eviction
+
+## List Recording
+
+**Stream List**:
+The live answer from the local list address: one entry per person who is streaming right now, each carrying that person's stream address. It is re-read every few seconds, and an entry's presence is the only signal that the person is streaming.
+_Avoid_: User list, roster, directory
+
+**Listed Person**:
+Someone present on the Stream List, known by their display name. Appearing and disappearing is what starts and stops their recording.
+_Avoid_: User, client, viewer, account
+
+**List Recording**:
+The recording of one Listed Person's stream. Held by one recorder child of its own, independent of every other Listed Person, so several run at the same time.
+_Avoid_: Multi recording, batch capture, session
+
+**Clean Name**:
+A Listed Person's display name after the characters Windows refuses are replaced and spaces become underscores. It leads the person's Clip names and is unique within one run.
+_Avoid_: Sanitized name, safe name, slug
+
+**Absence Grace**:
+The tolerance for a Listed Person missing from the Stream List: two replies in a row is what stops their recording, because one missing reply is not proof that they left.
+_Avoid_: Timeout, debounce, cooldown
+
+**Retry Limit**:
+The two reconnection attempts a List Recording gets after its stream drops. When both fail, the person becomes Given Up.
+_Avoid_: Max tries, backoff cap
+
+**Given Up**:
+A Listed Person whose recording stopped after the Retry Limit and is no longer retried while they stay listed. They are recorded again only after leaving the Stream List and coming back, or after their stream address changes.
+_Avoid_: Failed, dead, errored
+
+**List Recorder**:
+The separate program that keeps one List Recording per Listed Person. It reads no Schedule and no Recording Mode; the only setting it shares with the automator is the Clips folder.
+_Avoid_: Multi recorder, stream farm, bulk recorder
+

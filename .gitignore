@@ -10,6 +10,7 @@ __pycache__/
 
 # Logs
 telegram_monitor.log
+record_streams.log
 
 # Other
 SetResolution.xml

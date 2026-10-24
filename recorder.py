@@ -12,6 +12,9 @@ read on a background thread, so nothing the recorder writes can block the
 automator. Before every start a Stream Check looks at the stream's playlist
 and picks the newest segment that really exists. The Clips folder alone is
 watched, once per monitor cycle, to name the Clip being written in the log.
+The automator's own recording uses the defaults: endless reconnection and the
+timestamp-only Clip name. Two optional values let a List Recorder reuse the
+same engine with its own Clip-name prefix and a bounded Retry Limit.
 """
 
 import collections
@@ -42,6 +45,11 @@ TERMINATE_TIMEOUT_SECONDS = 3.0
 
 # Clip name pattern, unchanged from the old script.
 CLIP_NAME_PATTERN = "%Y%m%d_%H%M%S.mp4"
+
+# Clip name pattern for a caller that leads the name with its own text. The
+# four-digit year becomes two digits here, because that is the shape the List
+# Recorder file names are specified with.
+CLIP_NAME_PREFIXED_PATTERN = "%y%m%d_%H%M%S.mp4"
 
 # Where the recorder program starts reading the stream's playlist: three
 # entries back from the newest one. The playlist the stream publishes still
@@ -85,6 +93,9 @@ STATUS_STOPPED = "stopped"
 STATUS_RUNNING = "running"
 STATUS_WAITING = "waiting-to-retry"
 STATUS_DISK_STOP = "disk-stop"
+# Reported while the Retry Limit is exhausted and no child runs. Only an
+# explicit start by the caller clears it.
+STATUS_GAVE_UP = "gave-up"
 
 # The automator's own folder, used as the child's working directory exactly as
 # the old script ran next to the Recordings folder.
@@ -307,6 +318,13 @@ class RecorderSettings:
     ``output_dir`` is an absolute path; making it relative to the program is
     the caller's job. ``reconnect_seconds`` is a positive wait between a drop
     and the next attempt.
+
+    The optional values are added last so positional callers keep working.
+    ``clip_name_prefix`` is file-name text, never a folder, and stays empty for
+    the automator's own timestamp-only Clips. ``retry_limit`` None keeps
+    today's endless reconnection; a number caps consecutive failed attempts.
+    ``retry_reset_seconds`` is how long a child must have lived for its exit
+    to count as a good run and start the attempt count over.
     """
 
     stream_url: str
@@ -314,6 +332,20 @@ class RecorderSettings:
     clip_seconds: int
     reconnect_seconds: float
     ffmpeg_path: str
+    clip_name_prefix: str = ""
+    retry_limit: Optional[int] = None
+    retry_reset_seconds: float = 120.0
+
+
+def _clip_name_pattern(settings: RecorderSettings) -> str:
+    """Return the Clip name pattern, led by the caller's prefix when it has one.
+
+    The prefix only leads the file name; the folder is always the output
+    folder. An empty prefix keeps the automator's existing name untouched.
+    """
+    if settings.clip_name_prefix:
+        return settings.clip_name_prefix + CLIP_NAME_PREFIXED_PATTERN
+    return CLIP_NAME_PATTERN
 
 
 def build_ffmpeg_command(
@@ -328,7 +360,7 @@ def build_ffmpeg_command(
     continuous progress lines; ``-nostdin`` is not used, because the graceful
     quit writes the quit key to the child's input.
     """
-    output_pattern = os.path.join(settings.output_dir, CLIP_NAME_PATTERN)
+    output_pattern = os.path.join(settings.output_dir, _clip_name_pattern(settings))
     return [
         settings.ffmpeg_path,
         "-hide_banner",
@@ -395,6 +427,10 @@ class Recorder:
         self._started_at: Optional[datetime.datetime] = None
         self._retry_at: Optional[datetime.datetime] = None
         self._disk_stop = False
+        # Consecutive failed reconnection attempts, and whether the Retry Limit
+        # has been reached. Both start over on an explicit start.
+        self._failed_attempts = 0
+        self._gave_up = False
         # The Current Clip name already announced, and the file names that were
         # in the Clips folder when this run started. The second set is what
         # keeps leftovers from an earlier run out of the log.
@@ -408,14 +444,24 @@ class Recorder:
     def start(self, moment: datetime.datetime) -> bool:
         """Start a fresh recorder child, or return False when it cannot run.
 
-        An explicit start clears the disk-stop latch: the caller is asking for
-        recording, so the disk guard is done suppressing restarts. The Clips
+        An explicit start clears the disk-stop latch and the Retry Limit count,
+        including a ``gave-up`` state: the caller is asking for recording, so
+        the guard and the give-up are done suppressing restarts. The Clips
         folder is created when missing. A failed spawn is logged loudly and
         leaves the recorder ``stopped``; it never raises.
         """
         self._disk_stop = False
         self._retry_at = None
+        self._gave_up = False
+        self._failed_attempts = 0
+        return self._start_child(moment)
 
+    def _start_child(self, moment: datetime.datetime) -> bool:
+        """Spawn the child and report whether it started.
+
+        Reconnection uses this too, and must keep its failed-attempt count, so
+        the caller owns the counting and the state around it.
+        """
         if not self._settings.stream_url:
             logger.error(
                 "Cannot start recording: the stream address is empty. "
@@ -521,9 +567,16 @@ class Recorder:
         supplied *moment*. Before it elapses the recorder reports
         ``waiting-to-retry``. When it elapses a fresh Clip is started. A
         recorder that was never started is left alone, and a disk stop
-        suppresses reconnection until the caller starts again. It never waits
-        on the network or the child, beyond a short bounded join used to
-        collect the child's last words when it has just exited.
+        suppresses reconnection until the caller starts again. A recorder that
+        has reached its Retry Limit is left alone too: it reports ``gave-up``
+        and the "no more attempts" line is written only when that state is
+        reached, not once per cycle.
+
+        A child that lived at least ``retry_reset_seconds`` was a good run, so
+        its exit starts the failed-attempt count over; each failed
+        reconnection then adds one. This never waits on the network or the
+        child, beyond a short bounded join used to collect the child's last
+        words when it has just exited.
 
         This is also the call the monitor cycle makes every cycle while
         recording, so the Current Clip is announced from here.
@@ -535,6 +588,11 @@ class Recorder:
             return
 
         if self.is_running():
+            return
+
+        if self._gave_up:
+            # Silent on purpose: the one line was written when the limit was
+            # reached, and this call runs every cycle.
             return
 
         if self._started_at is None:
@@ -550,6 +608,9 @@ class Recorder:
             if child is not None:
                 # The child left on its own: its last words explain why.
                 self._dump_child_tail()
+            if self._child_lived_long_enough(moment):
+                # A good run: the next drop gets the full Retry Limit again.
+                self._failed_attempts = 0
             self._retry_at = moment + datetime.timedelta(seconds=wait)
             if exit_code is None:
                 logger.warning(
@@ -566,7 +627,18 @@ class Recorder:
             return
 
         self._retry_at = None
-        if not self.start(moment):
+        if not self._start_child(moment):
+            self._failed_attempts += 1
+            if self._reached_retry_limit():
+                # One line only, here, where the limit is reached; later
+                # cycles fall out above without adding noise.
+                self._gave_up = True
+                logger.warning(
+                    f"Reconnect failed {self._failed_attempts} time(s) in a row "
+                    f"and the Retry Limit of {self._settings.retry_limit} is "
+                    f"reached; no more attempts will be made."
+                )
+                return
             self._retry_at = moment + datetime.timedelta(seconds=wait)
             logger.warning(
                 f"Reconnect failed; trying again in {wait} seconds."
@@ -587,11 +659,19 @@ class Recorder:
         return self._child.poll() is None
 
     def status(self) -> str:
-        """Return ``stopped``, ``running``, ``waiting-to-retry``, or ``disk-stop``."""
+        """Return the recorder's state in plain words.
+
+        A live child is ``running`` even when failures were counted before; the
+        disk latch is ``disk-stop``; an exhausted Retry Limit is ``gave-up``;
+        a pending reconnect is ``waiting-to-retry``; anything else is
+        ``stopped``.
+        """
         if self.is_running():
             return STATUS_RUNNING
         if self._disk_stop:
             return STATUS_DISK_STOP
+        if self._gave_up:
+            return STATUS_GAVE_UP
         if self._retry_at is not None:
             return STATUS_WAITING
         return STATUS_STOPPED
@@ -609,6 +689,29 @@ class Recorder:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _child_lived_long_enough(self, moment: datetime.datetime) -> bool:
+        """Return True when the child that just left outlived the reset window.
+
+        The moment it started is remembered; a run at least
+        ``retry_reset_seconds`` long counts as good, so the next drop gets the
+        full Retry Limit again. A recorder that never started gives False.
+        """
+        if self._started_at is None:
+            return False
+        lived = (moment - self._started_at).total_seconds()
+        return lived >= self._settings.retry_reset_seconds
+
+    def _reached_retry_limit(self) -> bool:
+        """Return True when no further reconnection attempt may be made.
+
+        No limit (the automator's case) is endless reconnection, so it is
+        never reached.
+        """
+        limit = self._settings.retry_limit
+        if limit is None:
+            return False
+        return self._failed_attempts >= limit
 
     def _start_output_reader(self, child) -> None:
         """Read the child's error stream on a daemon thread.
@@ -681,14 +784,22 @@ class Recorder:
         """Return the newest Clip name written by this run, or None.
 
         Files that were already in the folder when the run started are
-        skipped, so only a name appearing afterwards counts. A folder that
-        cannot be listed is a debug note and gives None; it never raises.
+        skipped, so only a name appearing afterwards counts. When a Clip-name
+        prefix is set, only files led by it count: the Clips folder is shared
+        with the automator and with other List Recordings, and announcing
+        somebody else's file would name the wrong Clip. A folder that cannot be
+        listed is a debug note and gives None; it never raises.
         """
         names = self._list_clip_names()
         if names is None:
             return None
 
-        fresh = [name for name in names if name not in self._clips_at_start]
+        fresh = [
+            name
+            for name in names
+            if name not in self._clips_at_start
+            and name.startswith(self._settings.clip_name_prefix)
+        ]
         if not fresh:
             return None
         # Names are timestamps, so the largest name is the newest file. Any

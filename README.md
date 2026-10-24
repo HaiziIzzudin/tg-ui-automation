@@ -119,6 +119,49 @@ The dry run (`--dry-run`) never records: a rehearsal is window work only.
 
 The old `ffmpeg_cmd.ps1` PowerShell script stays in the repository as a manual backup only. It is not supported and is not used by the automator.
 
+## List Recording (optional)
+A second, separate program records **everyone on the live stream list** — the people a local bridge reports as streaming right now. The automator never starts it. It reads no Schedule and no Recording Mode, and it does no window or screen work. Start it in its own console, beside the automator or on its own.
+
+It needs two things: the list address answering, and the recorder program available. The list is a plain JSON array published by the bridge (`STREAMS_URL`, `http://127.0.0.1:8479/` by default). The recorder program is `STREAMS_FFMPEG_PATH` (`ffmpeg` by default). If the recorder program cannot be found the program says so and stops, because nothing could ever be recorded; every other problem is only logged and the program carries on.
+
+```bash
+python record_streams.py
+```
+
+The program reads the list every few seconds and keeps one recording per person on it. Press **Ctrl+C** to stop it. Every open file is closed properly first, so the last file plays to its end, and no recorder is left running behind it.
+
+The nine settings (all optional, see `example.env`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `STREAMS_URL` | `http://127.0.0.1:8479/` | The Stream List address. |
+| `STREAMS_POLL_SECONDS` | `5` | Seconds between two readings of the list. |
+| `STREAMS_CLIP_SECONDS` | `900` | Length of one file, in seconds. 15 minutes. |
+| `STREAMS_RECONNECT_SECONDS` | `5` | Wait after a stream drops before each reconnection attempt. |
+| `STREAMS_RETRY_LIMIT` | `2` | Reconnection attempts per drop before the person is given up. |
+| `STREAMS_RETRY_RESET_SECONDS` | `120` | How long a reconnected stream must last to count as a good run and give the person their attempts back. |
+| `STREAMS_FFMPEG_PATH` | `ffmpeg` | The recorder program. A bare name is looked up on the system path; a full path is used as given. |
+| `STREAMS_DISK_WARN_GB` | `10` | Free space, in gigabytes, below which a warning is logged once per crossing. |
+| `STREAMS_DISK_STOP_GB` | `2` | Free space, in gigabytes, below which every List Recording stops. Must be below the warning level. |
+
+It also reads `RECORDINGS_DIR` and `LOG_LEVEL`, exactly as the automator does. Those two are the only shared values.
+
+**Where Clips land.** The same folder as the automator's recordings (`RECORDINGS_DIR`), straight in it — no folders per person. A List Recording is named after the person first, then the moment it started: `Alif_Naim_261025_143000.mp4` is the person `Alif Naim` starting on 2026-10-25 at 14:30:00. The shape is the Clean Name, an underscore, a two-digit year, month, day, underscore, hour, minute, second, then `.mp4`. In the Clean Name, spaces become underscores and the characters Windows refuses in a file name become underscores; two people whose names end up the same get `_2`, `_3`, and so on. That leading name is what tells the two kinds of file apart: a List Recording starts with the person's name, the automator's own files start with the year, e.g. `20261019_140000.mp4`.
+
+**Files roll every 15 minutes.** One file covers one stretch of one person's stream. When it reaches `STREAMS_CLIP_SECONDS` (15 minutes by default) the recorder closes it and starts the next one, each file playable on its own. The source only makes a clean cut point about every 30 seconds, so a file may run a few seconds over or under the length you set.
+
+**When someone leaves.** A person is recorded while they are on the list. Missing from a single reply changes nothing; missing from two replies in a row (about ten seconds at the default poll) means they left, and their file is closed properly. A reply that cannot be read at all proves nothing either: a bridge restart or a dropped connection stops no recording, the failure is written to the log, and the log says so when the list answers again.
+
+**A stream that dies but the person stays listed.** The recorder waits `STREAMS_RECONNECT_SECONDS` and tries again, up to `STREAMS_RETRY_LIMIT` times. A stream that cannot be started at all counts the same way. When the attempts are used up the person is **Given Up**: no more attempts while they stay listed, with one line in the log saying why. They are recorded again once they leave the list and come back, or if their stream address changes. A reconnected stream that lasts longer than `STREAMS_RETRY_RESET_SECONDS` counts as a good run, so a later drop gets the two attempts back.
+
+**The disk guard works like the automator's.** Free space under `STREAMS_DISK_WARN_GB` logs one warning and recording continues. Free space under `STREAMS_DISK_STOP_GB` stops every List Recording so the disk never fills, and nothing new starts until space is back at the warning level. No Clip is ever deleted. Stopping for the disk is not the person's fault, so everyone starts over when space returns, including a person who had been given up.
+
+**Where it writes.** Its console and its own log file, `record_streams.log`, next to the program. Non-Latin names survive in it. The automator's `telegram_monitor.log` is never written to.
+
+**What it does not do.** No Schedule — it records at 3 a.m. as happily as at noon. No Recording Mode. No Telegram and no screen work: it never moves a window, clicks, or changes the resolution. It is not a Clip manager: it never deletes, moves, compresses, or uploads a file. It does not install itself as a service or a scheduled task; you start it and you stop it.
+
+**Both programs at once.** It can run alongside the automator. Both write into the same Clips folder and neither disturbs the other, and the two sets of names cannot clash because one kind leads with the person's name and the other with the year. The folder simply fills faster when both are running.
+
 ## Configuration (`.env`)
 All settings are optional and fall back to sensible defaults (see `example.env`):
 
@@ -134,7 +177,7 @@ All settings are optional and fall back to sensible defaults (see `example.env`)
 | `SECOND_WINDOW_RETRY_LIMIT` | `3` | Click retry attempts before recovery kicks in. |
 | `CLICK_RETRY_INTERVAL` | `3.0` | Seconds between click retry attempts. |
 
-The nine recording settings are listed in "Recording" above.
+The nine recording settings are listed in "Recording" above, and the nine List Recording settings in "List Recording" above.
 
 ## About pixel targeting
 Every size and coordinate in `.env` (`CLICK_POINTS`, `SECOND_WINDOW_SIZE`, `SECOND_WINDOW_POS`, and the built-in Telegram window size) is measured in **100% scaling pixels**.
