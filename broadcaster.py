@@ -94,8 +94,17 @@ def _reason_for(error: BaseException) -> str:
 
     if isinstance(error, ImportError):
         plain = "the OBS library is not installed"
-    elif "authentication" in lowered or "password" in lowered:
-        plain = "wrong password"
+    elif (
+        "authentication" in lowered
+        or "password" in lowered
+        or "identify client" in lowered
+        or "connection settings" in lowered
+    ):
+        # A wrong password and a wrong host or port answer with the same
+        # library error: the client could not identify itself. OBS is
+        # reachable and refusing, which is a different problem from a closed
+        # OBS, so the reason says so in plain words.
+        plain = "wrong password or wrong connection settings"
     elif name == "ConnectionRefusedError":
         plain = "connection refused"
     elif name in ("TimeoutError", "WebSocketTimeoutException", "OBSSDKTimeoutError"):

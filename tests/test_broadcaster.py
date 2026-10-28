@@ -420,6 +420,17 @@ class TestReadStreamState:
             read_stream_state(make_settings())
         assert "wrong password" in str(raised.value)
 
+    def test_obs_refusing_the_client_is_a_wrong_password_reason(self, fake_library):
+        # What OBS 1.8 answers to a wrong password: no friendly words at all,
+        # so the reason must still say OBS was reached and refused.
+        fake_library.fail_on_connect = RuntimeError(
+            "failed to identify client with the server, please check connection settings"
+        )
+        with pytest.raises(OBSUnavailable) as raised:
+            read_stream_state(make_settings())
+        assert "wrong password or wrong connection settings" in str(raised.value)
+        assert "could not be reached" not in str(raised.value)
+
     def test_a_failed_request_is_obsunavailable(self, fake_library):
         fake_library.status_error = RuntimeError("bad answer")
         with pytest.raises(OBSUnavailable) as raised:
