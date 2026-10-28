@@ -19,6 +19,7 @@ from recorder import (
     classify_free_space,
     ffmpeg_available,
 )
+from broadcaster import BroadcastSettings, Broadcaster, check_report
 
 # Load environment variables from .env file
 load_dotenv()
@@ -779,6 +780,159 @@ def stop_recording() -> None:
         _recorder.stop()
 
 # ==============================================================================
+# BROADCASTING
+# ==============================================================================
+# Broadcasting lives inside the automator too: the whole screen is pushed out
+# through OBS, driven from the monitor cycle. It shares nothing with recording
+# and nothing with the windows — Recovery, Click Retry, and the screen fix never
+# touch it. Broadcast faults are logged and never fail the window job.
+
+# The one broadcaster, kept at module level so it survives across monitor
+# cycles. It is created on first use through :func:`get_broadcaster`, so tests
+# can replace the accessor (or this module variable) with a fake instead of
+# talking to a real OBS.
+_broadcaster = None
+
+
+def get_broadcaster(settings) -> Broadcaster:
+    """Return the module-level broadcaster, creating it on first use.
+
+    The caller supplies the already-resolved settings the first time; later
+    calls reuse the same broadcaster, so its Restart Budget and its last known
+    stream state survive across monitor cycles. Tests replace this function (or
+    ``_broadcaster``) with a fake so no OBS is ever opened.
+    """
+    global _broadcaster
+    if _broadcaster is None:
+        _broadcaster = Broadcaster(settings)
+    return _broadcaster
+
+
+def _build_broadcast_settings() -> BroadcastSettings:
+    """Collect the broadcasting values into the broadcaster's settings object.
+
+    The four tuning fields of ``BroadcastSettings`` keep their defaults: they
+    are for tests, never for the user, so the settings file carries only the
+    five values below.
+    """
+    return BroadcastSettings(
+        enabled=config.broadcast_enabled,
+        host=config.broadcast_obs_host,
+        port=config.broadcast_obs_port,
+        password=config.broadcast_obs_password,
+        obs_path=config.broadcast_obs_path,
+    )
+
+
+def prepare_broadcast(dry_run=False) -> None:
+    """Announce the Broadcast Switch once and open OBS when broadcasting is on.
+
+    Called once, at startup, right after the recording line. Outside an Allowed
+    Period OBS is still opened and left idle in the tray: the choice is "open
+    once, when the automator starts". A rehearsal opens nothing. A fault inside
+    the broadcaster is logged and the run carries on.
+    """
+    try:
+        broadcaster = get_broadcaster(_build_broadcast_settings())
+        broadcaster.prepare(dry_run)
+    except Exception as error:
+        logger.error(f"Unexpected problem while preparing broadcasting: {error}")
+
+
+def update_broadcast(moment, schedule, dry_run=False) -> None:
+    """Bring the stream in line with the clock, the Schedule, and the switch.
+
+    Called every monitor cycle, immediately after the screen fix and before any
+    Telegram work, so the picture is already settled when a stream starts. This
+    is the only place a stream is started.
+
+    A stream is wanted only when this is not a rehearsal, the Broadcast Switch
+    is on, and there is no Schedule file or the moment is inside an Allowed
+    Period. Nothing else influences it — not the Recording Mode, not the List
+    Recorder, not the windows. A fault inside the broadcaster is logged and the
+    cycle carries on.
+    """
+    try:
+        wanted = (
+            (not dry_run)
+            and config.broadcast_enabled
+            and (schedule is None or schedule.is_allowed(moment))
+        )
+        broadcaster = get_broadcaster(_build_broadcast_settings())
+        broadcaster.update(moment, wanted)
+    except Exception as error:
+        logger.error(f"Unexpected problem while updating broadcasting: {error}")
+
+
+def stop_broadcast() -> None:
+    """Stop a live stream, so no stream outlives the automator's own run.
+
+    Called where the cycle finds itself outside an Allowed Period (which also
+    cleans up a stream left behind by a crashed run) and where the main loop
+    notices Ctrl+C. Safe to call when no broadcaster was ever created. A fault
+    inside the broadcaster is logged and the caller carries on.
+    """
+    if _broadcaster is None:
+        return
+    try:
+        _broadcaster.stop()
+    except Exception as error:
+        logger.error(f"Unexpected problem while stopping broadcasting: {error}")
+
+
+def check_obs_requested(argv) -> bool:
+    """Return True when ``--check-obs`` appears on the command line.
+
+    The argument list is passed in (not read from ``sys.argv``) for the same
+    reason as :func:`dry_run_requested`: tests never touch the real command
+    line.
+    """
+    return "--check-obs" in argv
+
+
+def print_obs_check(schedule) -> int:
+    """Report whether this machine is ready to broadcast, and return an exit code.
+
+    Read-only on purpose: nothing is opened, started, or stopped, and no window,
+    screen, or rotation is touched, so it is safe to run on a machine that is
+    mid-shift. Six lines are written through logging, so they land on the
+    console and in the log file like everything else:
+
+    1. whether the Broadcast Switch is on,
+    2. whether the OBS program file is there, whether a password is set (yes or
+       no, never the value), whether OBS is running, and what OBS answers about
+       the stream,
+    3. whether broadcasting would be live at this moment, given the clock and
+       the Schedule (no schedule file means always allowed).
+
+    ``schedule`` is the loaded Schedule, or ``None`` when there is no schedule
+    file. Returns ``0`` when OBS answered and ``1`` when it did not.
+    """
+    logger.info(
+        f"Broadcast switch: {'on' if config.broadcast_enabled else 'off'}."
+    )
+
+    reached = False
+    try:
+        report_lines, reached = check_report(_build_broadcast_settings())
+    except Exception as error:
+        report_lines = []
+        logger.error(f"Unexpected problem while checking OBS: {error}")
+    for line in report_lines:
+        logger.info(line)
+
+    now = datetime.datetime.now()
+    inside_period = schedule is None or schedule.is_allowed(now)
+    if not config.broadcast_enabled:
+        logger.info("Would be live now: no (the broadcast switch is off).")
+    elif not inside_period:
+        logger.info("Would be live now: no (the clock is outside every allowed period).")
+    else:
+        logger.info("Would be live now: yes (the switch is on and the clock is inside an allowed period).")
+
+    return 0 if reached else 1
+
+# ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 
@@ -813,6 +967,12 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
     early return, so Long-living keeps recording while the automator is in
     Suspend. The recording decision is independent of the windows and of any
     window work that follows.
+
+    Broadcasting is checked twice: the stream is stopped in the schedule gate's
+    outside-the-period branch, before Telegram is shut down, and the stream is
+    updated right after the screen fix, before any Telegram work. The gate ends
+    the cycle, and the resolution may change in the same cycle a stream starts,
+    so one call cannot sit in both places.
 
     The schedule gate sits just below the recording update, before the scale
     refresh, the screen guard, and any window work:
@@ -850,6 +1010,10 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
 
     # Schedule gate: Suspend (and Shutdown when needed) outside allowed hours.
     if schedule is not None and not schedule.is_allowed(moment):
+        # The stream stops before Telegram does: the period is over, and this
+        # also cleans up a stream left behind by a crashed run. The gate ends
+        # the cycle, so the stop has to sit here and not after the screen fix.
+        stop_broadcast()
         if is_telegram_running():
             logger.info("Outside the allowed period; shutting down Telegram.")
             kill_telegram()
@@ -885,6 +1049,12 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
         set_screen_size,
         read_screen_size,
     )
+
+    # The stream is checked after the screen fix and before any Telegram work:
+    # the resolution may have changed in this very cycle, and a live picture
+    # should not jump. This is the only place a stream is started; both early
+    # returns above (the gate and the launch guard) start nothing.
+    update_broadcast(moment, schedule, dry_run)
 
     if telegram_running is None:
         telegram_running = is_telegram_running()
@@ -992,8 +1162,18 @@ def run_dry_run(schedule):
 def main():
     logger.info("Starting Telegram Monitor Service...")
     schedule = validate_schedule_at_startup()
+
+    # Verification only: report what OBS says, then leave. Logging is already
+    # configured, so the report lands on the console and in the log file like
+    # everything else. Nothing else runs — no DPI setup, no screen work, no
+    # recording, no broadcaster, no Telegram — and given both flags the check
+    # wins over the rehearsal.
+    if check_obs_requested(sys.argv[1:]):
+        raise SystemExit(print_obs_check(schedule))
+
     set_dpi_awareness()
     log_recording_startup()
+    prepare_broadcast(dry_run_requested(sys.argv[1:]))
 
     if dry_run_requested(sys.argv[1:]):
         try:
@@ -1014,6 +1194,7 @@ def main():
         except KeyboardInterrupt:
             logger.info("Monitor Service stopped by user.")
             stop_recording()
+            stop_broadcast()
             break
         except Exception as e:
             logger.error(f"Unexpected error in main loop: {e}")
