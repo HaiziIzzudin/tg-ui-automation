@@ -19,7 +19,10 @@ from config import (
     parse_text,
     parse_log_level,
     parse_recordings_dir,
+    parse_bool,
+    parse_port,
     Config,
+    DEFAULT_OBS_PATH,
     DEFAULT_RECORDINGS_DIR,
     clamp_rotation,
 )
@@ -450,6 +453,166 @@ class TestParseRecordingsDir:
     def test_config_unc_value_is_kept(self, monkeypatch):
         monkeypatch.setenv("RECORDINGS_DIR", r"\\server\share\clips")
         assert Config().recordings_dir == r"\\server\share\clips"
+
+
+class TestParseBool:
+    """The Broadcast Switch accepts four word pairs, in any case and spacing."""
+
+    @pytest.mark.parametrize(
+        "yes", ["true", "TRUE", "True", "1", "yes", "YES", "on", "  On  ", "\tON\n"]
+    )
+    def test_true_words_are_true(self, yes):
+        assert parse_bool(yes, False) is True
+
+    @pytest.mark.parametrize(
+        "no", ["false", "FALSE", "False", "0", "no", "NO", "off", "  Off  ", "\tOFF\n"]
+    )
+    def test_false_words_are_false(self, no):
+        assert parse_bool(no, True) is False
+
+    @pytest.mark.parametrize("bad", ["sometimes", "", "   ", "2", "maybe", "-1"])
+    def test_nonsense_warns_once_and_keeps_a_false_default(self, caplog, bad):
+        with caplog.at_level("WARNING"):
+            result = parse_bool(bad, False)
+
+        assert result is False
+        warnings = [r for r in caplog.records if "switch value" in r.getMessage().lower()]
+        assert len(warnings) == 1
+        assert "on" in warnings[0].getMessage()
+
+    @pytest.mark.parametrize("bad", ["sometimes", "", "   ", "yep"])
+    def test_nonsense_warns_once_and_keeps_a_true_default(self, caplog, bad):
+        with caplog.at_level("WARNING"):
+            result = parse_bool(bad, True)
+
+        assert result is True
+        warnings = [r for r in caplog.records if "switch value" in r.getMessage().lower()]
+        assert len(warnings) == 1
+
+    def test_none_warns_and_returns_the_default(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert parse_bool(None, True) is True
+        assert any("switch value" in r.getMessage().lower() for r in caplog.records)
+
+
+class TestParsePort:
+    """A port is a whole number from 1 to 65535."""
+
+    @pytest.mark.parametrize("good", ["1", "4455", "65535", " 4455 "])
+    def test_accepts_ports_in_range(self, good):
+        assert parse_port(good, 4455) == int(good.strip())
+
+    @pytest.mark.parametrize("bad", ["0", "70000", "abc", "", "   ", "-1", "4455.5"])
+    def test_bad_values_warn_once_and_return_the_default(self, caplog, bad):
+        with caplog.at_level("WARNING"):
+            result = parse_port(bad, 4455)
+
+        assert result == 4455
+        warnings = [r for r in caplog.records if "port" in r.getMessage().lower()]
+        assert len(warnings) == 1
+
+    def test_none_warns_and_returns_the_default(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert parse_port(None, 4455) == 4455
+        assert any("port" in r.getMessage().lower() for r in caplog.records)
+
+    def test_the_default_is_used_as_given(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert parse_port("abc", 1234) == 1234
+
+
+_BROADCAST_KEYS = (
+    "BROADCAST_ENABLED",
+    "BROADCAST_OBS_HOST",
+    "BROADCAST_OBS_PORT",
+    "BROADCAST_OBS_PASSWORD",
+    "BROADCAST_OBS_PATH",
+)
+
+
+class TestBroadcastSettings:
+    """The five settings that point the automator at OBS, and the switch."""
+
+    def test_missing_keys_produce_the_fixed_defaults(self, monkeypatch):
+        for key in _BROADCAST_KEYS:
+            monkeypatch.delenv(key, raising=False)
+
+        config = Config()
+
+        assert config.broadcast_enabled is False
+        assert config.broadcast_obs_host == "127.0.0.1"
+        assert config.broadcast_obs_port == 4455
+        assert config.broadcast_obs_password == ""
+        assert config.broadcast_obs_path == DEFAULT_OBS_PATH
+
+    def test_default_obs_path_is_the_usual_install(self):
+        assert DEFAULT_OBS_PATH == r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+
+    def test_values_are_read_and_trimmed(self, monkeypatch):
+        monkeypatch.setenv("BROADCAST_ENABLED", "  Yes  ")
+        monkeypatch.setenv("BROADCAST_OBS_HOST", "  192.168.1.10  ")
+        monkeypatch.setenv("BROADCAST_OBS_PORT", " 4456 ")
+        monkeypatch.setenv("BROADCAST_OBS_PASSWORD", "  secret  ")
+        monkeypatch.setenv("BROADCAST_OBS_PATH", r"  D:\OBS\obs64.exe  ")
+
+        config = Config()
+
+        assert config.broadcast_enabled is True
+        assert config.broadcast_obs_host == "192.168.1.10"
+        assert config.broadcast_obs_port == 4456
+        assert config.broadcast_obs_password == "secret"
+        assert config.broadcast_obs_path == r"D:\OBS\obs64.exe"
+
+    @pytest.mark.parametrize("word", ["false", "0", "no", "off", "OFF"])
+    def test_switch_can_be_turned_off(self, monkeypatch, word):
+        monkeypatch.setenv("BROADCAST_ENABLED", word)
+        assert Config().broadcast_enabled is False
+
+    def test_empty_password_is_accepted_without_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv("BROADCAST_OBS_PASSWORD", "")
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.broadcast_obs_password == ""
+        assert not [r for r in caplog.records if "password" in r.getMessage().lower()]
+
+    def test_bad_port_warns_and_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("BROADCAST_OBS_PORT", "70000")
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.broadcast_obs_port == 4455
+        assert any("port" in r.getMessage().lower() for r in caplog.records)
+
+    def test_bad_switch_warns_and_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("BROADCAST_ENABLED", "sometimes")
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.broadcast_enabled is False
+        assert any("switch value" in r.getMessage().lower() for r in caplog.records)
+
+    def test_empty_obs_path_falls_back_to_the_default(self, monkeypatch, caplog):
+        monkeypatch.setenv("BROADCAST_OBS_PATH", "   ")
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.broadcast_obs_path == DEFAULT_OBS_PATH
+
+    def test_broadcast_settings_do_not_touch_recording(self, monkeypatch):
+        monkeypatch.delenv("RECORD_MODE", raising=False)
+        monkeypatch.delenv("RECORD_STREAM_URL", raising=False)
+        monkeypatch.setenv("BROADCAST_ENABLED", "true")
+
+        config = Config()
+
+        assert config.broadcast_enabled is True
+        assert config.recording_mode == "off"
+        assert config.record_stream_url == ""
 
 
 class TestClampRotation:

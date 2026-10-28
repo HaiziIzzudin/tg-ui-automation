@@ -11,12 +11,24 @@ _VALID_RECORD_MODES = ("off", "long-living", "follow-schedule")
 
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
+_VALID_TRUE_WORDS = ("true", "1", "yes", "on")
+
+_VALID_FALSE_WORDS = ("false", "0", "no", "off")
+
+_MIN_PORT = 1
+
+_MAX_PORT = 65535
+
 # Default Clips folder: the absolute path to "Recordings" next to the program.
 # Computed once at load time so the default is unambiguous and never joined
 # onto anything later.
 DEFAULT_RECORDINGS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "Recordings"
 )
+
+# Default OBS program: the usual install folder on this machine. A copy of the
+# settings file on another computer points BROADCAST_OBS_PATH at its own copy.
+DEFAULT_OBS_PATH = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
 
 
 def clamp_rotation(value: int) -> int:
@@ -168,6 +180,51 @@ def parse_recordings_dir(value: str, default: str) -> str:
     return default
 
 
+def parse_bool(value: str, default: bool) -> bool:
+    """Parse an on/off switch, returning default if the word is not known.
+
+    Accepts ``true``/``false``, ``1``/``0``, ``yes``/``no``, and ``on``/``off``,
+    case-insensitively and with surrounding spaces. Anything else warns once
+    naming the bad value and the accepted words, then falls back to *default*.
+    """
+    try:
+        word = value.strip().lower()
+    except AttributeError as e:
+        logger.warning(f"Invalid switch value '{value}': {e}. Using default {default}.")
+        return default
+    if word in _VALID_TRUE_WORDS:
+        return True
+    if word in _VALID_FALSE_WORDS:
+        return False
+    accepted = ", ".join(f"'{w}'" for w in _VALID_TRUE_WORDS + _VALID_FALSE_WORDS)
+    logger.warning(
+        f"Invalid switch value '{value}': accepted values are {accepted}. "
+        f"Using default {default}."
+    )
+    return default
+
+
+def parse_port(value: str, default: int) -> int:
+    """Parse a network port, returning default if it is not 1 to 65535.
+
+    Accepts an integer from 1 to 65535 inclusive. Text, a number outside that
+    range, or a missing value warns once naming the bad value and the default,
+    then falls back to *default*.
+    """
+    try:
+        port = int(value)
+    except (ValueError, TypeError, AttributeError) as e:
+        logger.warning(f"Invalid port '{value}': {e}. Using default {default}.")
+        return default
+    if port < _MIN_PORT or port > _MAX_PORT:
+        logger.warning(
+            f"Invalid port '{value}': must be between {_MIN_PORT} and "
+            f"{_MAX_PORT}. Using default {default}."
+        )
+        return default
+    return port
+
+
 def get_scale_factor() -> float:
     """Read the current system DPI scale factor (1.0 = 96 DPI, 1.5 = 144 DPI, etc.).
 
@@ -275,6 +332,25 @@ class Config:
             )
             self.record_disk_warn_gb = 10.0
             self.record_disk_stop_gb = 2.0
+        self.broadcast_enabled = parse_bool(
+            os.getenv("BROADCAST_ENABLED", "false"),
+            False,
+        )
+        self.broadcast_obs_host = parse_text(
+            os.getenv("BROADCAST_OBS_HOST", "127.0.0.1"),
+            "127.0.0.1",
+        )
+        self.broadcast_obs_port = parse_port(
+            os.getenv("BROADCAST_OBS_PORT", "4455"),
+            4455,
+        )
+        # The OBS password is optional: an empty value is accepted without a
+        # warning, because OBS itself then refuses the connection.
+        self.broadcast_obs_password = os.getenv("BROADCAST_OBS_PASSWORD", "").strip()
+        self.broadcast_obs_path = parse_text(
+            os.getenv("BROADCAST_OBS_PATH", DEFAULT_OBS_PATH),
+            DEFAULT_OBS_PATH,
+        )
         self.scale_factor: float = get_scale_factor()
 
     def refresh_scale_factor(self) -> float:
