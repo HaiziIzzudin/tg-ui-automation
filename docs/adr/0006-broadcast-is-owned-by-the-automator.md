@@ -1,0 +1,23 @@
+# Broadcast is owned by the automator: it opens OBS, starts the stream, and stops it
+
+The automator already places and repairs two windows on this screen, and the same screen is what goes out to a stream site through OBS Studio. Pressing *Start Streaming* and *Stop Streaming* by hand is the last manual step of every shift: a missed press costs a slot, a forgotten stop after a crash leaves a stream running for hours. So the automator now owns the stream too. Through OBS's WebSocket server it starts streaming at the first check of an **Allowed Period**, stops it when the period ends or on Ctrl+C, and survives Recovery and Click Retry. OBS itself is opened once at automator startup, folded to the tray so it cannot steal a click, and left open when the run ends. A **Silent OBS** is killed and reopened, at most three times per Allowed Period (the **Restart Budget**); a refused start is retried quietly forever. A **Broadcast Switch** (`BROADCAST_ENABLED`) is the only on/off control, and broadcasting follows the Schedule, never the Recording Mode.
+
+## Considered Options
+
+- **Keep it manual** — rejected: the whole reason this automator exists is that nobody is watching the clock. A stream that starts ten minutes late is lost revenue that no log would ever show.
+- **A separate broadcaster program, like the List Recorder** — rejected: a second program would need its own copy of the Schedule and its own idea of when the period starts, which is exactly the "two things must agree on the clock" problem ADR-0002 settled by making the automator the only time keeper. It would also have to wait for the screen fix, which lives inside the monitor cycle.
+- **Fold the stream into the recorder engine** — rejected: the two jobs point opposite ways. Recording pulls one fixed address down to disks, reconnects after drops, watches free space, and is gated by a Recording Mode. Broadcasting pushes the screen out, owns another program's process, and has to open that program before it can say a word. Sharing an engine would put "which direction" and "who owns OBS" into every method.
+- **Make OBS start the stream itself** (`--startstreaming` at launch) — rejected: it cannot stop mid-day, cannot tell a refused start from a dropped one, and gives the automator no way to know whether the stream is live.
+- **The automator owns OBS's process and stream output** (chosen) — one program, one log, one clock, and the stream decision sits next to the screen fix that changes the resolution under it.
+
+## Consequences
+
+- **OBS becomes a process the automator may kill.** Killing it loses unsaved GUI changes and can greet the next launch with OBS's "crashed last time" prompt, which no launch parameter suppresses. The kill only happens after two minutes of silence, and at most three times in a period.
+- **The stream is live before the picture is ready.** Broadcasting starts at the first check of a period, not after the windows are placed, so viewers can watch the setup clicks and a Recovery. This was chosen over a cleaner picture because a late start costs more than an ugly one.
+- **The OBS password lives in `.env`**, a second copy of a secret OBS already stores. The client library logs that password at INFO and a traceback per failed connection, so its logger tree must stay silenced above CRITICAL — losing that line leaks the secret into the automator's log and floods it every three seconds.
+- **Broadcast is portable by settings alone.** The automator reads and writes nothing in OBS's own configuration, so moving to another computer is a settings file plus an OBS that is already logged in with its stream key. The check-only run reports what is missing without opening OBS or going live, which is how a new machine is proven first.
+- **Broadcast and Recording share nothing**: no setting, no code path, no state, and the List Recorder ignores broadcasting entirely. A change to one must not move the other.
+- **OBS is opened once and left open**, so it sits idle in the tray for hours when the automator starts far from its period. The alternative — opening it per period — was rejected for the delay it adds between "period starts" and "stream is live".
+- **The Broadcast Check adds up to three seconds to a cycle while OBS is silent**, because the monitor loop waits for the connection timeout before doing its window work.
+- **A hard crash still leaves the stream running.** Nothing stops it on the way down; the next automator startup stops it at the first check outside a period.
+- A future reader may try to merge broadcasting into the recorder because both "talk to streams". They point in opposite directions and one of them owns a process; merging them would make the window job depend on OBS.

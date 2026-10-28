@@ -116,6 +116,28 @@ _Avoid_: Reconnect loop, retry
 Stopping recording because the disk is critically low on space, after a warning. No Clip is ever deleted for the user.
 _Avoid_: Cleanup, eviction
 
+## Broadcasting
+
+**Broadcast**:
+Sending the whole screen out to a stream site through OBS Studio, for viewers, driven by the automator. It follows the Schedule and is independent of Recording: one writes files, the other sends pictures out.
+_Avoid_: Live stream, going live, stream (it collides with the streams being recorded)
+
+**Broadcast Switch**:
+The one setting that allows broadcasting. On, the stream follows the Schedule; off, the automator never touches OBS's stream output and never opens OBS.
+_Avoid_: Broadcast mode, streaming toggle
+
+**Broadcast Check**:
+The automator's look at OBS's stream state during every monitor cycle, to catch a dropped stream or a dead OBS. Not the **Stream Check**, which belongs to Recording and reads a playlist.
+_Avoid_: Stream check, health check
+
+**Silent OBS**:
+OBS that sits on the disk but says nothing over its remote control — refusing, timing out, or rejecting the password. The only state that ever leads to killing it.
+_Avoid_: Hung, crashed, unresponsive
+
+**Restart Budget**:
+The three OBS reopenings the automator may perform inside one Allowed Period, counted afresh at the start of each period. Spent, the automator keeps trying the stream but never kills OBS again until the next period.
+_Avoid_: Retry limit (it belongs to List Recording), restart cap
+
 ## List Recording
 
 **Stream List**:
