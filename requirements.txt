@@ -4,3 +4,4 @@ psutil
 python-dotenv
 pytest
 rotate-screen
+obsws-python
