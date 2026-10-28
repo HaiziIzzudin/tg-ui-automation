@@ -15,6 +15,7 @@ A specialized Windows Python utility that keeps Telegram and a target secondary 
 - **Secure Configuration**: Uses a `.env` file for sensitive window titles and all tunable settings.
 - **Time Ranges (Schedule)**: Optionally limit when Telegram runs to day/time ranges defined in a `schedule.json` file (see "Schedule" below).
 - **Stream Recording (optional)**: Records a live stream straight to disk while the automator runs — plus around the clock for the "long-living" mode or only during the schedule's hours (see "Recording" below).
+- **Broadcasting (optional)**: Sends this whole screen live through OBS Studio, starting and stopping the stream itself and following the Schedule (see "Broadcasting" below).
 
 ## Prerequisites
 - Windows OS
@@ -39,6 +40,8 @@ Run the script using Python:
 python main.py
 ```
 The script will run in the console and log its activity to `telegram_monitor.log`.
+
+Two optional flags sit beside it: `python main.py --dry-run` for a rehearsal, and `python main.py --check-obs` to report whether this computer is ready to broadcast, without going live.
 
 Run the tests with:
 ```bash
@@ -119,6 +122,73 @@ The dry run (`--dry-run`) never records: a rehearsal is window work only.
 
 The old `ffmpeg_cmd.ps1` PowerShell script stays in the repository as a manual backup only. It is not supported and is not used by the automator.
 
+## Broadcasting (optional)
+The automator can send **this whole screen** out to a stream site through OBS Studio while it keeps looking after the windows. Nobody presses *Start Streaming* or *Stop Streaming*: the automator presses both, at the right moments, and keeps an eye on the stream in between.
+
+**Broadcasting is not recording.** Recording pulls *someone else's* stream down from the network into files on this computer. Broadcasting pushes *this screen* out to a stream site. The two directions share nothing — no setting, no switch, no state — so turning one on never turns the other on, and a problem with one never touches the other.
+
+**The one switch.** `BROADCAST_ENABLED` is the only control. It is off by default, and off means exactly today's behaviour: OBS is not opened, and no stream is started or stopped.
+
+**It follows the Schedule.** Inside an allowed period the stream goes live at the first check — *before* the windows are placed, by choice, so a viewer may watch the desktop, the setup clicks, or a recovery happen. The screen fix runs first, so a resolution or rotation change never shows up in the middle of a live picture. When the period ends, or when you press Ctrl+C, the stream is stopped and OBS is left open and idle. With no `schedule.json`, every moment is allowed, so it broadcasts around the clock.
+
+**What must already be true inside OBS.** The automator presses two buttons OBS already has, and nothing more. Before you switch broadcasting on, OBS itself must have:
+- its WebSocket server turned on;
+- a password set on that server, with its port and that password known to you;
+- the stream destination (server address) and the stream key already filled in.
+
+The automator never reads or writes OBS's own settings, never switches scene or profile, and never sees the stream key. Where the stream goes stays entirely inside OBS, exactly as you typed it there.
+
+**Both programs at the same privilege level.** Start the automator and OBS with the same rights — either both normally, or both as administrator. Windows will not let a normal program open, close, or drive a program that was started as administrator, and the reverse is also true. If they differ, OBS is up and answers nothing; the check mode below is what reports that silence.
+
+**What the automator does with OBS.** It opens OBS itself, once, when it starts — folded to the tray, so it cannot steal a click, on whatever scene it had last. It does that even when the clock is outside an allowed period, so OBS is ready the moment a period starts. If you close OBS while it is needed, it is opened again at the next check. Nobody closes it: OBS is left open, idle, when the run ends.
+
+The five settings (all optional, see `example.env`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROADCAST_ENABLED` | `false` | The only switch. Accepts `true/false`, `1/0`, `yes/no`, `on/off`, any case. Anything else warns and stays off. |
+| `BROADCAST_OBS_HOST` | `127.0.0.1` | Where OBS's remote control listens. |
+| `BROADCAST_OBS_PORT` | `4455` | Its port. |
+| `BROADCAST_OBS_PASSWORD` | *(empty)* | The WebSocket password. Empty is accepted here; OBS itself then refuses and the log says why once. |
+| `BROADCAST_OBS_PATH` | `C:\Program Files\obs-studio\bin\64bit\obs64.exe` | The OBS program. A missing file is logged once and broadcasting is off for that run; the window job keeps running. |
+
+An empty host or an empty program path falls back to the default in the table, with one warning, rather than leaving broadcasting half-configured.
+
+**Check a new machine (`--check-obs`).** Before anything goes live on a computer, ask the automator whether that computer is ready:
+
+```bash
+python main.py --check-obs
+```
+
+It reports six things, one line each, and then stops. It never opens OBS, never starts or stops a stream, and never touches a window, the screen, or the rotation, so it is safe on a machine that is mid-shift.
+
+1. whether the switch is on;
+2. whether the OBS program file is really there at `BROADCAST_OBS_PATH`;
+3. whether a password is set — said as *set* or *not set*; the password itself is never printed;
+4. whether OBS is running right now;
+5. what OBS answers about the stream: `live`, `idle`, or the reason it could not be reached;
+6. whether broadcasting would be live at this moment, given the clock and the Schedule.
+
+It ends with exit code `0` when OBS answered, and `1` when it did not — so a script can tell the two apart, and so can you with `$LASTEXITCODE` in PowerShell. The lines also land in `telegram_monitor.log`, like every other log line. Given `--dry-run` at the same time, the check wins and nothing else runs.
+
+The first run on a new computer, in this order:
+
+1. With `BROADCAST_ENABLED=false`, start the automator once. The log says broadcasting is off and the window job works as always.
+2. Turn the switch on and run the check mode. It must say `idle` (or `live`, if a stream is running), or name exactly what is missing.
+3. Only then run for real, inside an allowed period.
+
+No step in that list can start a stream by itself.
+
+**The quiet facts.** Nothing here needs your attention while it is working:
+- OBS closed by you is opened again at the next check, and the stream follows. That is limited to three reopenings per allowed period (the Restart Budget), counted afresh at the start of each period.
+- OBS that stops answering — refusing, timing out, or rejecting the password — is killed and opened again after about two minutes of silence, also counted against those three. When the three are used up, the log says so once and OBS is left alone until the next period.
+- A stream that drops is started again at the next check: one warning, then one line when it is back.
+- A start the stream site refuses (a wrong key, a rejected account, an encoder problem) is retried at every check, forever, without spending a reopening: one warning when the trouble appears and one line when it clears. The automator cannot say which of those it is — OBS's own log holds the reason.
+- A rehearsal (`--dry-run`) never opens OBS and never goes live. With the switch on, a stream it finds running is stopped.
+- With the switch on, a stream left running by a crash is stopped at the first check outside an allowed period, on the next startup. With the switch off, the automator leaves OBS alone entirely.
+- While OBS is silent, each check waits up to three seconds for the answer before doing its window work, so the cycle is slower until OBS answers again.
+- Broadcast trouble never stops the window job. Telegram keeps being managed exactly as usual, and the automator never exits because of OBS.
+
 ## List Recording (optional)
 A second, separate program records **everyone on the live stream list** — the people a local bridge reports as streaming right now. The automator never starts it. It reads no Schedule and no Recording Mode, and it does no window or screen work. Start it in its own console, beside the automator or on its own.
 
@@ -177,7 +247,7 @@ All settings are optional and fall back to sensible defaults (see `example.env`)
 | `SECOND_WINDOW_RETRY_LIMIT` | `3` | Click retry attempts before recovery kicks in. |
 | `CLICK_RETRY_INTERVAL` | `3.0` | Seconds between click retry attempts. |
 
-The nine recording settings are listed in "Recording" above, and the nine List Recording settings in "List Recording" above.
+The nine recording settings are listed in "Recording" above, the nine List Recording settings in "List Recording" above, and the five broadcasting settings in "Broadcasting" above.
 
 ## About pixel targeting
 Every size and coordinate in `.env` (`CLICK_POINTS`, `SECOND_WINDOW_SIZE`, `SECOND_WINDOW_POS`, and the built-in Telegram window size) is measured in **100% scaling pixels**.
