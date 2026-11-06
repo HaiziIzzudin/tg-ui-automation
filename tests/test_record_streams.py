@@ -197,7 +197,7 @@ class TestEngineSettings:
         engine_settings = factory.made[0].settings
         assert engine_settings.clip_name_prefix == "Alif_Naim_"
         assert engine_settings.stream_url == "http://bridge.test/8198214155/camera.m3u8"
-        assert engine_settings.output_dir == r"D:\Clips"
+        assert engine_settings.output_dir == r"D:\Clips\Alif_Naim"
         assert engine_settings.clip_seconds == 900
         assert engine_settings.reconnect_seconds == 5.0
         assert engine_settings.ffmpeg_path == "ffmpeg"
@@ -223,6 +223,47 @@ class TestEngineSettings:
 
         prefixes = [engine.settings.clip_name_prefix for engine in factory.made]
         assert prefixes == ["a_b_", "a_b_2_"]
+
+    def test_the_person_folder_is_the_clip_name_without_its_underscore(self):
+        farm, factory, _free = build_farm()
+
+        farm.cycle(at(0), [listed("Alif Naim")])
+
+        engine_settings = factory.made[0].settings
+        folder_name = engine_settings.output_dir.rsplit("\\", 1)[-1]
+        assert folder_name == engine_settings.clip_name_prefix.rstrip("_")
+        assert engine_settings.output_dir.startswith(r"D:\Clips" + "\\")
+
+    def test_a_name_clash_gives_the_second_person_their_own_folder_too(self):
+        farm, factory, _free = build_farm()
+
+        farm.cycle(at(0), [listed("a b"), listed("a_b")])
+
+        folders = [engine.settings.output_dir for engine in factory.made]
+        assert folders == [r"D:\Clips\a_b", r"D:\Clips\a_b_2"]
+
+    def test_an_empty_name_keeps_the_shared_clips_folder(self):
+        settings = make_settings(output_dir=r"D:\Clips")
+
+        engine_settings = record_streams.build_engine_settings(
+            settings, "http://bridge.test/1/camera.m3u8"
+        )
+
+        assert engine_settings.output_dir == r"D:\Clips"
+        assert engine_settings.clip_name_prefix == ""
+
+    def test_a_failed_start_never_falls_back_to_the_shared_folder(self, caplog):
+        caplog.set_level(logging.WARNING)
+        farm, factory, _free = build_farm(start_ok=False)
+
+        farm.cycle(at(0), [listed("Jevv")])
+        farm.cycle(at(5), [listed("Jevv")])
+        farm.cycle(at(10), [listed("Jevv")])
+
+        folders = [engine.settings.output_dir for engine in factory.made]
+        assert folders
+        assert all(folder == r"D:\Clips\Jevv" for folder in folders)
+        assert any("giving up" in text for text in messages(caplog))
 
     def test_one_engine_is_made_per_person(self):
         farm, factory, _free = build_farm()
@@ -1068,7 +1109,10 @@ class TestProgramEntry:
 
         text = "\n".join(messages(caplog))
         assert "http://127.0.0.1:8479/" in text
-        assert r"D:\Clips" in text
+        assert (
+            "Clips folder: D:\\Clips (each Listed Person records into a folder "
+            "of their own inside it)" in text
+        )
         assert "Poll interval: 5 seconds" in text
         assert "Clip length: 900 seconds" in text
         assert "Retry Limit: 2" in text
