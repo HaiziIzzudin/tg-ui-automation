@@ -30,6 +30,12 @@ DEFAULT_RECORDINGS_DIR = os.path.join(
 # settings file on another computer points BROADCAST_OBS_PATH at its own copy.
 DEFAULT_OBS_PATH = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
 
+# Default Telegram program: the usual per-user install on Windows. Built with
+# expanduser so it names the current user's own copy.
+DEFAULT_TELEGRAM_PATH = os.path.expanduser(
+    os.path.join("~", "AppData", "Roaming", "Telegram Desktop", "Telegram.exe")
+)
+
 
 def clamp_rotation(value: int) -> int:
     """Return *value* if it is a valid rotation, otherwise 0."""
@@ -129,13 +135,32 @@ def parse_record_mode(value: str, default: str = "off") -> str:
     return mode
 
 
-def parse_text(value: str, default: str) -> str:
-    """Trim *value*, returning default if it is empty after trimming."""
+def parse_text(value: str, default: str, setting_name: Optional[str] = None) -> str:
+    """Trim *value*, returning default if it is empty after trimming.
+
+    *setting_name*, when given, is the name of the setting being read and is
+    named in the warning; without it the warning keeps its original wording.
+    """
     text = value.strip()
     if not text:
-        logger.warning(f"Empty value. Using default '{default}'.")
+        label = f"{setting_name} value" if setting_name else "value"
+        logger.warning(f"Empty {label}. Using default '{default}'.")
         return default
     return text
+
+
+def parse_telegram_path(value: Optional[str], default: str) -> str:
+    """Return the Telegram program file named by the settings.
+
+    An absent value (``None``) is a line nobody wrote: the usual per-user
+    install is used silently. A line that is present but blank is an entry
+    someone cleared, so it warns once naming ``TELEGRAM_PATH`` and the default
+    it falls back to. The absence test happens here, before parsing, so an
+    absent line never earns that warning.
+    """
+    if value is None:
+        return default
+    return parse_text(value, default, "TELEGRAM_PATH")
 
 
 def parse_log_level(value: str, default: str = "INFO") -> str:
@@ -180,17 +205,21 @@ def parse_recordings_dir(value: str, default: str) -> str:
     return default
 
 
-def parse_bool(value: str, default: bool) -> bool:
+def parse_bool(value: str, default: bool, setting_name: Optional[str] = None) -> bool:
     """Parse an on/off switch, returning default if the word is not known.
 
     Accepts ``true``/``false``, ``1``/``0``, ``yes``/``no``, and ``on``/``off``,
     case-insensitively and with surrounding spaces. Anything else warns once
     naming the bad value and the accepted words, then falls back to *default*.
+
+    *setting_name*, when given, is the name of the setting being read and is
+    named in the warning; without it the warning keeps its original wording.
     """
+    label = f"{setting_name} value" if setting_name else "switch value"
     try:
         word = value.strip().lower()
     except AttributeError as e:
-        logger.warning(f"Invalid switch value '{value}': {e}. Using default {default}.")
+        logger.warning(f"Invalid {label} '{value}': {e}. Using default {default}.")
         return default
     if word in _VALID_TRUE_WORDS:
         return True
@@ -198,7 +227,7 @@ def parse_bool(value: str, default: bool) -> bool:
         return False
     accepted = ", ".join(f"'{w}'" for w in _VALID_TRUE_WORDS + _VALID_FALSE_WORDS)
     logger.warning(
-        f"Invalid switch value '{value}': accepted values are {accepted}. "
+        f"Invalid {label} '{value}': accepted values are {accepted}. "
         f"Using default {default}."
     )
     return default
@@ -256,6 +285,10 @@ class Config:
     """Centralized configuration loaded from environment variables with parsing and defaults."""
 
     def __init__(self):
+        self.telegram_path = parse_telegram_path(
+            os.getenv("TELEGRAM_PATH"),
+            DEFAULT_TELEGRAM_PATH,
+        )
         self.second_window_title = os.getenv("SECOND_WINDOW_TITLE", "secondWindowTitle")
         self.screen_resolution = parse_resolution(
             os.getenv("SCREEN_RESOLUTION", "1920x1080"),
@@ -300,6 +333,11 @@ class Config:
             "off",
         )
         self.record_stream_url = os.getenv("RECORD_STREAM_URL", "").strip()
+        self.record_list_enabled = parse_bool(
+            os.getenv("RECORD_LIST_ENABLED", "false"),
+            False,
+            "RECORD_LIST_ENABLED",
+        )
         self.recordings_dir = parse_recordings_dir(
             os.getenv("RECORDINGS_DIR", DEFAULT_RECORDINGS_DIR),
             DEFAULT_RECORDINGS_DIR,

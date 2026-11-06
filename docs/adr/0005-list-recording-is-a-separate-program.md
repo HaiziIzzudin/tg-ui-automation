@@ -2,6 +2,8 @@
 
 _Contradicts ADR-0004 (recording lives inside the automator) on one point: that record declared "one stream, no lists" and rejected a separate recording service. This decision revisits it for a second, different kind of recording._
 
+_Reversed on one point by ADR-0007 (the automator owns the List Recorder's lifetime): "Neither starts the other" no longer holds, because the automator now starts, watches, and stops this program while its List Recorder Switch is on. Everything else here stands._
+
 A local bridge publishes a **Stream List**: a JSON array of everyone streaming right now, each with a stream address. People appear and disappear within seconds, so the recorder has to start and stop itself several times an hour, and several streams run at once. The automator's recording was built for the opposite shape: one address, one child, alive for hours, gated by the Schedule and the Recording Mode.
 
 We decided to add a **List Recorder**: a second, separate program that reads the Stream List every few seconds and keeps one **List Recording** per **Listed Person**. It reuses the recorder engine and the Clips folder, and shares nothing else — no Schedule, no Recording Mode, no window work.

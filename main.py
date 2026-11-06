@@ -5,6 +5,7 @@ import datetime
 import subprocess
 import shutil
 import logging
+import signal
 import pyautogui
 import pygetwindow as gw
 import psutil
@@ -13,6 +14,7 @@ import rotatescreen
 from dotenv import load_dotenv
 from config import Config
 from schedule import SCHEDULE_FILENAME, ScheduleError, load_schedule
+import recorder
 from recorder import (
     Recorder,
     RecorderSettings,
@@ -27,8 +29,6 @@ load_dotenv()
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-TELEGRAM_EXE = "Telegram.exe"
-TELEGRAM_PATH = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Telegram Desktop", "Telegram.exe")
 TELEGRAM_TITLE = "Telegram"
 
 MONITOR_INTERVAL = 3.0      # Seconds to wait between process checks
@@ -152,6 +152,80 @@ def load_live_schedule(previous, path=DEFAULT_SCHEDULE_PATH):
         return previous
 
 # ==============================================================================
+# THE TELEGRAM PROGRAM AND THE CLIPS FOLDER
+# ==============================================================================
+# The Telegram program file is resolved once, at launch, from the settings;
+# everything that finds, launches, or kills Telegram keys on that one resolved
+# path. One cheap file-exists test per cycle refuses all window work while the
+# file is missing, and speaks about it only when the answer changes.
+
+def telegram_program_path() -> str:
+    """Return the Telegram program file named by the settings."""
+    return config.telegram_path
+
+
+def telegram_process_name() -> str:
+    """Return the Telegram program's file name, taken from the resolved path."""
+    return os.path.basename(telegram_program_path())
+
+
+def telegram_program_present() -> bool:
+    """Return True when the resolved Telegram program is an existing file."""
+    return os.path.isfile(telegram_program_path())
+
+
+def log_startup_locations() -> None:
+    """Name the Telegram program and the Clips folder once, at launch.
+
+    Two lines, in this order, right after the DPI line and immediately before
+    the Recording Mode line, on a real run and a rehearsal alike. Neither line
+    has quotes and neither ends with a full stop.
+    """
+    logger.info(f"Telegram program: {telegram_program_path()}")
+    logger.info(
+        f"Clips folder: {resolve_recordings_dir()} "
+        f"(each Listed Person records into a folder of their own inside it)"
+    )
+
+
+# Whether the last cycle found the program missing, so the log speaks once at
+# the loss and once at the return instead of every three seconds.
+_telegram_program_missing = False
+
+
+def check_telegram_program() -> bool:
+    """Return True when window work may run this cycle.
+
+    One cheap file-exists test against the resolved path, done after the
+    schedule gate and the launch guard and before any process check or window
+    work. While the file is not an existing file the answer is False and every
+    window action is refused; the screen fix, broadcasting, recording, and the
+    List Recorder never read this path and carry on.
+
+    The log speaks on change only: one error when the file goes missing,
+    silence while it stays missing, one line when it comes back, and the error
+    again at a later loss.
+    """
+    global _telegram_program_missing
+
+    path = telegram_program_path()
+    if not telegram_program_present():
+        if not _telegram_program_missing:
+            logger.error(
+                f"The Telegram program '{path}' (TELEGRAM_PATH) was not found; "
+                f"no Telegram or window work until it is back. Recording and "
+                f"broadcasting are unaffected."
+            )
+            _telegram_program_missing = True
+        return False
+
+    if _telegram_program_missing:
+        logger.info(f"The Telegram program '{path}' is back; window work resumes.")
+        _telegram_program_missing = False
+    return True
+
+
+# ==============================================================================
 # DPI AWARENESS
 # ==============================================================================
 
@@ -180,10 +254,15 @@ def set_dpi_awareness():
 # ==============================================================================
 
 def is_telegram_running() -> bool:
-    """Check if the Telegram process is currently running."""
+    """Check if the Telegram process is currently running.
+
+    The process name is the file name of the resolved program path, so a copy
+    with another name is found, restarted, and killed like the usual one.
+    """
+    process_name = telegram_process_name()
     for proc in psutil.process_iter(['name']):
         try:
-            if proc.info['name'] and proc.info['name'].lower() == TELEGRAM_EXE.lower():
+            if proc.info['name'] and proc.info['name'].lower() == process_name.lower():
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
@@ -191,18 +270,19 @@ def is_telegram_running() -> bool:
 
 def kill_telegram():
     """Terminate the Telegram process."""
-    logger.info(f"Attempting to terminate {TELEGRAM_EXE}...")
+    process_name = telegram_process_name()
+    logger.info(f"Attempting to terminate {process_name}...")
     for proc in psutil.process_iter(['name']):
         try:
-            if proc.info['name'] and proc.info['name'].lower() == TELEGRAM_EXE.lower():
+            if proc.info['name'] and proc.info['name'].lower() == process_name.lower():
                 proc.terminate()
                 proc.wait(timeout=5)
-                logger.info(f"{TELEGRAM_EXE} terminated.")
+                logger.info(f"{process_name} terminated.")
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
         except psutil.TimeoutExpired:
-            logger.warning(f"{TELEGRAM_EXE} did not terminate in time, killing...")
+            logger.warning(f"{process_name} did not terminate in time, killing...")
             try:
                 proc.kill()
             except:
@@ -211,9 +291,10 @@ def kill_telegram():
 
 def launch_telegram() -> bool:
     """Launch Telegram and wait for the window to appear."""
-    logger.info(f"Launching Telegram from: {TELEGRAM_PATH}")
+    path = telegram_program_path()
+    logger.info(f"Launching Telegram from: {path}")
     try:
-        subprocess.Popen(TELEGRAM_PATH)
+        subprocess.Popen(path)
     except Exception as e:
         logger.error(f"Failed to launch Telegram: {e}")
         return False
@@ -933,6 +1014,433 @@ def print_obs_check(schedule) -> int:
     return 0 if reached else 1
 
 # ==============================================================================
+# THE LIST RECORDER
+# ==============================================================================
+# The automator owns the List Recorder while the List Recorder Switch is on:
+# it adopts a leftover copy at startup, starts one when none is running, keeps
+# it alive, and stops it on the way out. Four events reach this log — a start,
+# an adoption, a death with its restart, and a stop — and nothing while
+# everything is steady. The helper's own chatter stays in its own log.
+#
+# With the switch off the automator takes no part at all: no scan, no adoption,
+# no start, no restart, and no stop, not even on Ctrl+C. A rehearsal starts
+# nothing either and still says which switch it is.
+
+# The helper program sits next to the automator's own file; no setting names it.
+LIST_RECORDER_PROGRAM = "record_streams.py"
+
+# A death is followed by a fixed wait, then a restart, forever. The stop on the
+# way out gives the helper the same ten seconds to close its open Clips.
+LIST_RECORDER_RESTART_SECONDS = 10.0
+LIST_RECORDER_STOP_GRACE_SECONDS = 10.0
+LIST_RECORDER_KILL_GRACE_SECONDS = 3.0
+
+# The one supervision object, kept at module level so it survives across monitor
+# cycles. It stays ``None`` when the switch is off and in a rehearsal, so every
+# helper function below is a quiet no-op there.
+_list_recorder = None
+
+
+def list_recorder_program_path() -> str:
+    """Return the helper program file: record_streams.py next to this file."""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), LIST_RECORDER_PROGRAM
+    )
+
+
+def find_list_recorder_process():
+    """Return a running List Recorder, or None. One process-table scan.
+
+    The match is the helper program's file name inside the process's command
+    line, the same way Telegram and OBS are already found by name. No pid file
+    and no lock file: this also finds a copy the user started by hand.
+    """
+    program_name = os.path.basename(list_recorder_program_path()).lower()
+    try:
+        processes = psutil.process_iter(["name", "cmdline"])
+    except Exception as error:
+        logger.debug(f"Could not read the process table: {error}")
+        return None
+
+    for proc in processes:
+        try:
+            parts = proc.info.get("cmdline") or []
+            for part in parts:
+                if part and os.path.basename(part).lower() == program_name:
+                    return proc
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return None
+
+
+def console_process_ids():
+    """Return the process ids attached to this console, or None when unknown.
+
+    The console stop signal only reaches processes on the automator's own
+    console: a copy started by hand in another console cannot answer it. This
+    is the one cheap question that tells the two apart, so the ask is never
+    reported as delivered when it cannot arrive.
+    """
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ids = (ctypes.c_uint32 * 256)()
+        count = kernel32.GetConsoleProcessList(ids, 256)
+    except Exception as error:
+        logger.debug(f"Could not read this console's processes: {error}")
+        return None
+    if not count:
+        return None
+    return set(ids[:count])
+
+
+def launch_list_recorder_process(program_path=None, interpreter=None, has_console=None):
+    """Start the helper: same interpreter, its own process group, no window.
+
+    Its standard output and error are discarded, so its chatter never reaches
+    the automator's console or log; its own log file is its record. When the
+    automator has a console the helper shares it — a new process group keeps
+    the user's Ctrl+C to the automator alone, and the stop signal the automator
+    sends on the way out can reach the helper. Only when there is no console to
+    share does the helper get the "no window" flag, so it never opens one.
+    """
+    command = [
+        interpreter or sys.executable,
+        program_path or list_recorder_program_path(),
+    ]
+    if has_console is None:
+        has_console = console_process_ids() is not None
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if not has_console:
+        flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.Popen(
+        command,
+        creationflags=flags,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def send_console_stop_signal(pid) -> bool:
+    """Ask the helper's process group to stop, the way Ctrl+C would ask it.
+
+    The helper handles that signal by running its ordinary shutdown, which
+    closes every open Clip and exits with code 0. Only a helper on this console
+    can hear it; a copy started by hand in another console cannot, and reports
+    False so the caller goes straight to terminate and kill, as the spec says.
+    """
+    stop_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if stop_signal is None or pid is None:
+        return False
+    members = console_process_ids()
+    if members is not None and pid not in members:
+        logger.debug(
+            "The List Recorder is not on this console; the stop signal cannot "
+            "reach it."
+        )
+        return False
+    try:
+        os.kill(pid, stop_signal)
+        return True
+    except Exception as error:
+        logger.debug(f"Could not ask the List Recorder to stop: {error}")
+        return False
+
+
+def job_object_protection_available() -> bool:
+    """Return True when the engine ends recorder children with their program.
+
+    The helper runs the same engine on this same machine, so the automator's
+    own answer stands in for the helper's: where Windows refuses the job
+    object, the forced kill has to say that recorders may still be running.
+    """
+    try:
+        return bool(recorder.job_object_available())
+    except Exception:
+        return False
+
+
+
+class ListRecorderSupervisor:
+    """The one List Recorder the automator owns: adopt, start, restart, stop.
+
+    A death is noticed from the handle kept at launch — the child's ``poll()``
+    or the adopted process's own running state — never from a second
+    process-table scan. A child the automator itself ended is not a death: the
+    stop request is remembered before any wait begins.
+
+    The seams (how to spawn, how to ask it to stop, the clock, the sleep) are
+    injected so tests never start a real child.
+    """
+
+    POLL_INTERVAL_SECONDS = 0.1
+
+    def __init__(
+        self,
+        program_path=None,
+        interpreter=None,
+        spawn=None,
+        ask=None,
+        clock=None,
+        sleep=None,
+        restart_seconds=LIST_RECORDER_RESTART_SECONDS,
+        stop_grace_seconds=LIST_RECORDER_STOP_GRACE_SECONDS,
+        kill_grace_seconds=LIST_RECORDER_KILL_GRACE_SECONDS,
+    ):
+        self.program_path = program_path or list_recorder_program_path()
+        self.interpreter = interpreter or sys.executable
+        self.restart_seconds = restart_seconds
+        self.stop_grace_seconds = stop_grace_seconds
+        self.kill_grace_seconds = kill_grace_seconds
+        self._spawn = spawn or launch_list_recorder_process
+        self._ask = ask or send_console_stop_signal
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or time.sleep
+        # The handle we keep: our own child, or an adopted process. Never both.
+        self._child = None
+        self._adopted = None
+        # Set before any wait begins, so a child we ended is never a death.
+        self._stop_requested = False
+        self._restart_at = 0.0
+        self._started_once = False
+        self._death_warned = False
+
+    # -- what we know ---------------------------------------------------
+
+    def is_running(self) -> bool:
+        """Return True while the helper we own is still there."""
+        if self._adopted is not None:
+            try:
+                return bool(self._adopted.is_running())
+            except Exception:
+                return False
+        if self._child is not None:
+            return self._child.poll() is None
+        return False
+
+    def _pid(self):
+        """Return the helper's process id, or None when nothing is known."""
+        if self._adopted is not None:
+            return getattr(self._adopted, "pid", None)
+        if self._child is not None:
+            return getattr(self._child, "pid", None)
+        return None
+
+    def _forget(self) -> None:
+        self._child = None
+        self._adopted = None
+
+    # -- the small verbs ------------------------------------------------
+
+    def adopt(self, process) -> None:
+        """Take over an outside List Recorder found at startup, once."""
+        self._adopted = process
+        self._child = None
+        # It is ours now, so a replacement after its death reads as a restart.
+        self._started_once = True
+        logger.info(
+            "A List Recorder was already running; watching it instead of "
+            "starting a second one."
+        )
+
+    def ensure_running(self) -> bool:
+        """Keep the helper alive: notice a death, wait, then launch again.
+
+        Called at the very top of every monitor cycle, before the recording
+        update and the schedule gate, so Suspend and any Recording Mode leave
+        the helper running. Returns True when a helper is running at the end.
+        Never raises: a failed launch takes the death path.
+        """
+        if self._stop_requested:
+            return False
+
+        if self.is_running():
+            return True
+
+        if self._child is not None or self._adopted is not None:
+            # It died while the switch still wants one.
+            self._forget()
+            self._restart_at = self._clock() + self.restart_seconds
+            self._log_death()
+            return False
+
+        if self._clock() < self._restart_at:
+            return False
+
+        return self.start()
+
+    def start(self) -> bool:
+        """Launch the helper once. A failed launch is the death path."""
+        try:
+            child = self._spawn(self.program_path, self.interpreter)
+        except Exception as error:
+            self._child = None
+            self._restart_at = self._clock() + self.restart_seconds
+            self._log_death(error)
+            return False
+
+        self._child = child
+        self._adopted = None
+        if self._started_once:
+            logger.info("List Recorder restarted.")
+        else:
+            logger.info("List Recorder started.")
+        self._started_once = True
+        return True
+
+    def _log_death(self, error=None) -> None:
+        """Speak once per run at full volume; repeats stay at debug."""
+        line = "List Recorder is no longer running; restarting it in 10 seconds."
+        if self._death_warned:
+            logger.debug(line)
+        else:
+            logger.warning(line)
+            self._death_warned = True
+        if error is not None:
+            logger.debug(f"Could not start the List Recorder: {error}")
+
+    # -- the way out ----------------------------------------------------
+
+    def stop(self) -> None:
+        """Ask the helper to stop, then terminate, then kill it.
+
+        The ask is the console's own stop signal to its process group, with ten
+        seconds to close every open Clip. Every step says what happened; a
+        forced kill is not a lost Clip because the fragment flags leave every
+        Clip playable. Never raises.
+        """
+        if self._stop_requested:
+            return
+        self._stop_requested = True
+
+        if not self.is_running():
+            self._forget()
+            return
+
+        pid = self._pid()
+        asked = self._ask(pid)
+        if asked and self._wait_for_exit(self.stop_grace_seconds):
+            logger.info("List Recorder stopped; every open Clip is closed.")
+            self._forget()
+            return
+
+        logger.info(
+            "List Recorder did not stop within 10 seconds; terminating it — "
+            "open Clips may be cut."
+        )
+        self._terminate()
+        if self._wait_for_exit(self.kill_grace_seconds):
+            self._forget()
+            return
+
+        logger.info("List Recorder still running; killing it.")
+        self._kill()
+        if not self._wait_for_exit(self.kill_grace_seconds):
+            logger.debug("The List Recorder could not be killed.")
+            self._forget()
+            return
+
+        if job_object_protection_available():
+            logger.info("The List Recorder was killed; its recorders ended with it.")
+        else:
+            logger.info(
+                "The List Recorder was killed; any List Recordings it owned may "
+                "still be running."
+            )
+        self._forget()
+
+    def _wait_for_exit(self, seconds) -> bool:
+        """Wait up to *seconds* for the helper to leave; True when it left."""
+        deadline = self._clock() + seconds
+        while True:
+            if not self.is_running():
+                return True
+            if self._clock() >= deadline:
+                return False
+            self._sleep(self.POLL_INTERVAL_SECONDS)
+
+    def _terminate(self) -> None:
+        try:
+            if self._adopted is not None:
+                self._adopted.terminate()
+            elif self._child is not None:
+                self._child.terminate()
+        except Exception as error:
+            logger.debug(f"Could not terminate the List Recorder: {error}")
+
+    def _kill(self) -> None:
+        try:
+            if self._adopted is not None:
+                self._adopted.kill()
+            elif self._child is not None:
+                self._child.kill()
+        except Exception as error:
+            logger.debug(f"Could not kill the List Recorder: {error}")
+
+
+def log_list_recorder_startup() -> None:
+    """Log the List Recorder Switch once, on every launch including a rehearsal."""
+    logger.info(
+        f"List Recorder switch: {'on' if config.record_list_enabled else 'off'}."
+    )
+
+
+def prepare_list_recorder(dry_run=False) -> None:
+    """Take charge of the helper at startup, once, before anything is started.
+
+    With the switch off the automator does not take part at all, and a rehearsal
+    does nothing at all. Otherwise the process table is scanned once for a
+    leftover copy: one found is adopted with one line; none found means nothing
+    is started here, and the first cycle starts one.
+    """
+    global _list_recorder
+
+    if _list_recorder is not None:
+        return
+    if dry_run or not config.record_list_enabled:
+        return
+
+    supervisor = ListRecorderSupervisor()
+    _list_recorder = supervisor
+    try:
+        leftover = find_list_recorder_process()
+        if leftover is not None:
+            supervisor.adopt(leftover)
+    except Exception as error:
+        logger.debug(f"Could not look for a running List Recorder: {error}")
+
+
+def keep_list_recorder_alive() -> None:
+    """Keep the helper alive; called at the very top of every monitor cycle.
+
+    A no-op with the switch off and in a rehearsal. A fault here is logged and
+    the cycle carries on: the window job never waits on the helper.
+    """
+    supervisor = _list_recorder
+    if supervisor is None:
+        return
+    try:
+        supervisor.ensure_running()
+    except Exception as error:
+        logger.error(f"Unexpected problem while keeping the List Recorder alive: {error}")
+
+
+def stop_list_recorder() -> None:
+    """Stop the helper on the way out, before the automator's own recording.
+
+    A no-op with the switch off and in a rehearsal, so a copy started by hand
+    keeps running and the automator's quit leaves it alone. A fault here is
+    logged and the quit carries on.
+    """
+    supervisor = _list_recorder
+    if supervisor is None:
+        return
+    try:
+        supervisor.stop()
+    except Exception as error:
+        logger.error(f"Unexpected problem while stopping the List Recorder: {error}")
+
+# ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 
@@ -963,10 +1471,14 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
     never sleeps ``MONITOR_INTERVAL`` and never exits the process; the outer
     :func:`main` loop sleeps between cycles.
 
-    Recording is updated at the very top, before the schedule gate and every
-    early return, so Long-living keeps recording while the automator is in
-    Suspend. The recording decision is independent of the windows and of any
-    window work that follows.
+    The List Recorder is kept alive at the very top, beside the recording
+    update, so Suspend, no Schedule file, and any Recording Mode leave it
+    running and the window job never waits on it.
+
+    Recording is updated next, before the schedule gate and every early return,
+    so Long-living keeps recording while the automator is in Suspend. The
+    recording decision is independent of the windows and of any window work
+    that follows.
 
     Broadcasting is checked twice: the stream is stopped in the schedule gate's
     outside-the-period branch, before Telegram is shut down, and the stream is
@@ -988,6 +1500,12 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
     would have to tear down seconds later. The wait skips the screen guard and
     all window work; the next cycle re-checks the clock.
 
+    The Telegram program file is checked just below the launch guard, before
+    the process check. While the resolved path is not an existing file every
+    window action is refused (the cycle returns after the screen fix and the
+    stream update); the Shutdown above still runs, and recording and the List
+    Recorder are untouched.
+
     ``moment`` is the local clock reading used by the gate. When it is
     ``None`` the current time is read here; the schedule checker itself never
     reads the clock.
@@ -1003,6 +1521,11 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
 
     if moment is None:
         moment = datetime.datetime.now()
+
+    # The List Recorder is kept alive at the very top of the cycle, beside the
+    # recording update and before the schedule gate: Suspend, no Schedule file,
+    # and any Recording Mode all leave it running.
+    keep_list_recorder_alive()
 
     # Recording comes first, before the schedule gate and every early return:
     # Long-living must keep recording while the automator is in Suspend.
@@ -1035,6 +1558,12 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
             return
         telegram_running = True
 
+    # The Telegram program file is checked here, after the gate and the launch
+    # guard and before the process check: while it is missing, every window
+    # action is refused. The screen fix and the stream below still run, and so
+    # do recording and the List Recorder — none of them reads this path.
+    window_work_allowed = check_telegram_program()
+
     # Re-read scale factor each cycle; only log when it changes
     config.refresh_scale_factor()
     if config.scale_factor != _last_scale_factor:
@@ -1056,11 +1585,16 @@ def run_monitor_cycle(schedule, moment=None, dry_run=False):
     # returns above (the gate and the launch guard) start nothing.
     update_broadcast(moment, schedule, dry_run)
 
+    # A missing program refuses all window work, and the cycle ends here: no
+    # process check follows, and nothing above this line is undone.
+    if not window_work_allowed:
+        return
+
     if telegram_running is None:
         telegram_running = is_telegram_running()
 
     if not telegram_running:
-        logger.warning(f"Process {TELEGRAM_EXE} not found. Initiating setup sequence...")
+        logger.warning(f"Process {telegram_process_name()} not found. Initiating setup sequence...")
 
         # 1. Launch Telegram
         if not launch_telegram():
@@ -1171,11 +1705,20 @@ def main():
     if check_obs_requested(sys.argv[1:]):
         raise SystemExit(print_obs_check(schedule))
 
-    set_dpi_awareness()
-    log_recording_startup()
-    prepare_broadcast(dry_run_requested(sys.argv[1:]))
+    dry_run = dry_run_requested(sys.argv[1:])
 
-    if dry_run_requested(sys.argv[1:]):
+    set_dpi_awareness()
+    log_startup_locations()
+    log_recording_startup()
+
+    # Broadcasting announces the Broadcast Switch and opens OBS; the List
+    # Recorder Switch line follows it, and both sit before the rehearsal branch
+    # so a rehearsal reads the same switches as a real run.
+    prepare_broadcast(dry_run)
+    log_list_recorder_startup()
+    prepare_list_recorder(dry_run)
+
+    if dry_run:
         try:
             run_dry_run(schedule)
         except KeyboardInterrupt:
@@ -1193,6 +1736,9 @@ def main():
 
         except KeyboardInterrupt:
             logger.info("Monitor Service stopped by user.")
+            # The helper first: it may own several recorder children and may
+            # need up to ten seconds, then the automator's own recording.
+            stop_list_recorder()
             stop_recording()
             stop_broadcast()
             break

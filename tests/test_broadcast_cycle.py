@@ -129,6 +129,10 @@ def _make_config(
     cfg.second_window_retry_limit = 1
     cfg.click_retry_interval = 0.0
     cfg.kill_cooldown_seconds = 0
+    # The two switches of the List Recorder work: no helper is wanted here, and
+    # the window-work gate is answered by its own boundary below.
+    cfg.record_list_enabled = False
+    cfg.telegram_path = r"D:\Apps\Telegram.exe"
     return cfg
 
 
@@ -161,6 +165,7 @@ def _patched(*, config=None, broadcaster=None, installed=None, events=None,
         # Windows and processes
         is_telegram_running=MagicMock(return_value=False),
         kill_telegram=MagicMock(),
+        telegram_program_present=MagicMock(return_value=True),
         launch_telegram=MagicMock(return_value=True),
         perform_telegram_actions=MagicMock(return_value=True),
         setup_second_window=MagicMock(return_value=True),

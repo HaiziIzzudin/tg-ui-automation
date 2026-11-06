@@ -96,11 +96,12 @@ One setting picks the mode. There are two modes plus off:
 | `long-living` | Records day and night — including outside the allowed hours and while the automator is suspended — and ignores the schedule. |
 | `follow-schedule` | Records only during the allowed hours in `schedule.json` (with no schedule file, everything is allowed, so it records 24/7). It closes the current file when a period ends and starts a fresh one when the next period begins. |
 
-The nine settings (all optional, see `example.env`):
+The ten settings (all optional, see `example.env`):
 
 | Variable | Default | Description |
 |---|---|---|
 | `RECORD_MODE` | `off` | `off`, `long-living`, or `follow-schedule`. Anything else warns and falls back to `off`. |
+| `RECORD_LIST_ENABLED` | `false` | The List Recorder Switch. On, the automator starts and watches the List Recorder (see "List Recording" below); off, it never looks for, adopts, starts, or stops one. Accepts `true/false`, `1/0`, `yes/no`, `on/off`, any case. |
 | `RECORD_STREAM_URL` | *(empty)* | The stream address to record. Empty means recording cannot start. |
 | `RECORDINGS_DIR` | the `Recordings` folder next to the program | Folder for the records. **Must be an absolute path** — a drive path like `D:\Recordings` or a UNC path like `\\server\share\clips`. A relative or empty value warns and falls back to the default. Created when missing. |
 | `RECORD_CLIP_SECONDS` | `7200` | Length of one recorded file, in seconds. |
@@ -190,7 +191,7 @@ No step in that list can start a stream by itself.
 - Broadcast trouble never stops the window job. Telegram keeps being managed exactly as usual, and the automator never exits because of OBS.
 
 ## List Recording (optional)
-A second, separate program records **everyone on the live stream list** — the people a local bridge reports as streaming right now. The automator never starts it. It reads no Schedule and no Recording Mode, and it does no window or screen work. Start it in its own console, beside the automator or on its own.
+A second, separate program records **everyone on the live stream list** — the people a local bridge reports as streaming right now. The automator starts and watches it for you when `RECORD_LIST_ENABLED` is on: it starts it, starts it again if it dies, and stops it when you stop the automator. You can still start it by hand in its own console. It reads no Schedule and no Recording Mode, and it does no window or screen work.
 
 It needs two things: the list address answering, and the recorder program available. The list is a plain JSON array published by the bridge (`STREAMS_URL`, `http://127.0.0.1:8479/` by default). The recorder program is `STREAMS_FFMPEG_PATH` (`ffmpeg` by default). If the recorder program cannot be found the program says so and stops, because nothing could ever be recorded; every other problem is only logged and the program carries on.
 
@@ -198,7 +199,7 @@ It needs two things: the list address answering, and the recorder program availa
 python record_streams.py
 ```
 
-The program reads the list every few seconds and keeps one recording per person on it. Press **Ctrl+C** to stop it. Every open file is closed properly first, so the last file plays to its end, and no recorder is left running behind it.
+The program reads the list every few seconds and keeps one recording per person on it. Press **Ctrl+C** to stop it when you started it by hand; either way, every open file is closed properly first, so the last file plays to its end, and no recorder is left running behind it. A copy the automator had to kill still leaves files that play, but they may end mid-stretch.
 
 The nine settings (all optional, see `example.env`):
 
@@ -216,7 +217,7 @@ The nine settings (all optional, see `example.env`):
 
 It also reads `RECORDINGS_DIR` and `LOG_LEVEL`, exactly as the automator does. Those two are the only shared values.
 
-**Where Clips land.** The same folder as the automator's recordings (`RECORDINGS_DIR`), straight in it — no folders per person. A List Recording is named after the person first, then the moment it started: `Alif_Naim_261025_143000.mp4` is the person `Alif Naim` starting on 2026-10-25 at 14:30:00. The shape is the Clean Name, an underscore, a two-digit year, month, day, underscore, hour, minute, second, then `.mp4`. In the Clean Name, spaces become underscores and the characters Windows refuses in a file name become underscores; two people whose names end up the same get `_2`, `_3`, and so on. That leading name is what tells the two kinds of file apart: a List Recording starts with the person's name, the automator's own files start with the year, e.g. `20261019_140000.mp4`.
+**Where Clips land.** Inside `RECORDINGS_DIR`, the same folder the automator's own recordings go in, every person gets a folder of their own named exactly after them, and all their Clips go in it. A List Recording is named after the person first, then the moment it started: `Alif_Naim\Alif_Naim_261025_143000.mp4` is the person `Alif Naim`, starting on 2026-10-25 at 14:30:00, in their own folder `Alif_Naim`. The shape is the Clean Name, an underscore, a two-digit year, month, day, underscore, hour, minute, second, then `.mp4`. In the Clean Name, spaces become underscores and the characters Windows refuses in a file name become underscores; two people whose names end up the same get `_2`, `_3`, and so on, and their folders get the same name as their Clips. That folder is made when the person's first recording starts; if it cannot be made, the start fails honestly, is logged and retried, and never falls back to writing at the top level. Nothing is ever moved or deleted, and Clips recorded before this change stay flat where they are. The leading name is what tells the two kinds of file apart: a List Recording starts with the person's name, the automator's own files start with the year, e.g. `20261019_140000.mp4`, and those keep landing at the top of the folder, not in a person's folder.
 
 **Files roll every 15 minutes.** One file covers one stretch of one person's stream. When it reaches `STREAMS_CLIP_SECONDS` (15 minutes by default) the recorder closes it and starts the next one, each file playable on its own. The source only makes a clean cut point about every 30 seconds, so a file may run a few seconds over or under the length you set.
 
@@ -226,17 +227,18 @@ It also reads `RECORDINGS_DIR` and `LOG_LEVEL`, exactly as the automator does. T
 
 **The disk guard works like the automator's.** Free space under `STREAMS_DISK_WARN_GB` logs one warning and recording continues. Free space under `STREAMS_DISK_STOP_GB` stops every List Recording so the disk never fills, and nothing new starts until space is back at the warning level. No Clip is ever deleted. Stopping for the disk is not the person's fault, so everyone starts over when space returns, including a person who had been given up.
 
-**Where it writes.** Its console and its own log file, `record_streams.log`, next to the program. Non-Latin names survive in it. The automator's `telegram_monitor.log` is never written to.
+**Where it writes.** Its own log file, `record_streams.log`, next to the program — and its console, when you start it by hand. Non-Latin names survive in it. The automator's `telegram_monitor.log` is never written to.
 
-**What it does not do.** No Schedule — it records at 3 a.m. as happily as at noon. No Recording Mode. No Telegram and no screen work: it never moves a window, clicks, or changes the resolution. It is not a Clip manager: it never deletes, moves, compresses, or uploads a file. It does not install itself as a service or a scheduled task; you start it and you stop it.
+**What it does not do.** No Schedule — it records at 3 a.m. as happily as at noon. No Recording Mode. No Telegram and no screen work: it never moves a window, clicks, or changes the resolution. It is not a Clip manager: it never deletes, moves, compresses, or uploads a file. It does not install itself as a service or a scheduled task. With the switch on, the automator starts and stops it with its own run; with the switch off, you do.
 
-**Both programs at once.** It can run alongside the automator. Both write into the same Clips folder and neither disturbs the other, and the two sets of names cannot clash because one kind leads with the person's name and the other with the year. The folder simply fills faster when both are running.
+**Both programs at once.** It runs alongside the automator, and with `RECORD_LIST_ENABLED` on it always does. Both share the Clips folder and neither disturbs the other: the automator's own files sit at the top of it, each person's Clips sit one level down in that person's folder, and the two sets of names cannot clash because one kind leads with the person's name and the other with the year. The disk simply fills faster when both are recording.
 
 ## Configuration (`.env`)
 All settings are optional and fall back to sensible defaults (see `example.env`):
 
 | Variable | Default | Description |
 |---|---|---|
+| `TELEGRAM_PATH` | the usual per-user Telegram install | The Telegram program file, not its folder. A missing line, or an empty value, uses `%APPDATA%\Telegram Desktop\Telegram.exe`. When the named file is missing, the automator keeps running but does no Telegram or window work until it is back. |
 | `SECOND_WINDOW_TITLE` | `secondWindowTitle` | Exact title of the secondary window to control. |
 | `SCREEN_RESOLUTION` | `1920x1080` | Expected screen resolution, enforced every cycle. |
 | `SCREEN_ROTATION` | `0` | Expected screen rotation in degrees: `0`, `90`, `180`, or `270`. |
@@ -247,7 +249,9 @@ All settings are optional and fall back to sensible defaults (see `example.env`)
 | `SECOND_WINDOW_RETRY_LIMIT` | `3` | Click retry attempts before recovery kicks in. |
 | `CLICK_RETRY_INTERVAL` | `3.0` | Seconds between click retry attempts. |
 
-The nine recording settings are listed in "Recording" above, the nine List Recording settings in "List Recording" above, and the five broadcasting settings in "Broadcasting" above.
+The ten recording settings are listed in "Recording" above, the nine List Recording settings in "List Recording" above, and the five broadcasting settings in "Broadcasting" above.
+
+**If the Telegram program is missing.** When the file `TELEGRAM_PATH` names is not there — or when the default location is empty too — the automator keeps running and says so once, but it does no window work at all: no launching Telegram, no Click Sequence or Click Retry, no resizing, restoring, or activating its window, no Target Window work, and no Recovery. The screen fix and broadcasting carry on, the automator's own recording and the List Recorder are untouched, and the check repeats every few seconds, so putting the file back resumes everything by itself. The log speaks once when the file goes missing and once when it comes back.
 
 ## About pixel targeting
 Every size and coordinate in `.env` (`CLICK_POINTS`, `SECOND_WINDOW_SIZE`, `SECOND_WINDOW_POS`, and the built-in Telegram window size) is measured in **100% scaling pixels**.
@@ -260,7 +264,7 @@ The script logs the scale factor and the real pixel positions it clicks, so you 
 
 ## How it Works
 1. **Schedule Gate** (optional): If `schedule.json` exists and the current time is outside all allowed ranges, stops Telegram (if running), skips all other work this cycle (no screen enforcement), and waits for the next range. Everything below is skipped while suspended.
-2. **Detection**: Checks the Windows process list for `Telegram.exe`.
+2. **Detection**: Checks the Windows process list for the program named by `TELEGRAM_PATH` — the usual `Telegram.exe` install unless you changed it. While that file is missing, all window work is refused and everything else carries on.
 3. **Screen Guard**: Every cycle, compares actual rotation and resolution against `SCREEN_ROTATION` / `SCREEN_RESOLUTION`. When either is off, it fixes both in one pass — turn the screen to Rotation 0 (horizontal), set the resolution there, then turn the screen to the configured rotation. Each move is verified by reading the screen back and retried up to two times. If the first turn fails, the resolution step is skipped that cycle (the resolution is never set on a sideways screen); if the resolution step fails, the screen still finishes at the configured rotation; whatever is still off is retried next cycle.
 4. **Setup**: Launches Telegram, resizes it to 800x600, and clicks the configured `CLICK_POINTS` inside.
 5. **Adjustment**: Moves and resizes the secondary window specified in your `.env` (or maximizes it).
