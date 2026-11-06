@@ -15,14 +15,21 @@ watched, once per monitor cycle, to name the Clip being written in the log.
 The automator's own recording uses the defaults: endless reconnection and the
 timestamp-only Clip name. Two optional values let a List Recorder reuse the
 same engine with its own Clip-name prefix and a bounded Retry Limit.
+
+Every child started here is placed in one Windows job object, so a recorder
+ends when the program that owns it ends, however it ends, including a hard
+kill. Where Windows refuses that job, recording carries on without the
+protection after one debug line: recording is never refused because of it.
 """
 
 import collections
+import ctypes
 import datetime
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -426,6 +433,195 @@ def classify_free_space(
     return "stop"
 
 
+# ---------------------------------------------------------------------------
+# The job object: recorder children end with the program that owns them
+# ---------------------------------------------------------------------------
+# A dying program on Windows does not end its children, so a killed automator
+# or List Recorder could leave one recorder per person writing into the same
+# folders while a fresh program starts new ones. One job object with "kill the
+# members when the last handle closes" closes that hole: the handle is held for
+# the whole run, and Windows ends every assigned child when the program goes,
+# including a hard kill. Reached through ctypes, which the repo already uses,
+# so no dependency is added. Other systems simply have nothing to do.
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+_PROCESS_TERMINATE = 0x0001
+_PROCESS_SET_QUOTA = 0x0100
+
+_IS_WINDOWS = sys.platform == "win32"
+
+
+class _JobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _JobIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobBasicLimitInformation),
+        ("IoInfo", _JobIoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _last_error_words() -> str:
+    """Return Windows' own words for the last error, without the number."""
+    code = ctypes.get_last_error()
+    return ctypes.WinError(code).strerror or f"error {code}"
+
+
+class ChildJob:
+    """One Windows job object whose members end when this program ends.
+
+    Only the two calls the engine needs are wrapped: put a child in, and keep
+    the handle open. The handle is never closed on purpose; closing it is what
+    ends the members, and the program's own exit does that.
+    """
+
+    def __init__(self, kernel32, handle):
+        self._kernel32 = kernel32
+        self._handle = handle
+
+    def place(self, child) -> None:
+        """Put the recorder *child* in the job.
+
+        Raises when Windows refuses this child, so the caller can log one
+        debug line and carry on without protection.
+        """
+        process = self._kernel32.OpenProcess(
+            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, child.pid
+        )
+        if not process:
+            raise OSError(_last_error_words())
+        try:
+            if not self._kernel32.AssignProcessToJobObject(self._handle, process):
+                raise OSError(_last_error_words())
+        finally:
+            self._kernel32.CloseHandle(process)
+
+
+def create_child_job():
+    """Return the job object that ends recorder children with this program.
+
+    None on anything but Windows, where there is nothing to do. Raises when
+    Windows refuses the job, which the caller turns into one debug line and no
+    protection: recording is never refused because of it.
+    """
+    if not _IS_WINDOWS:
+        return None
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.CreateJobObjectW(None, None)
+    if not handle:
+        raise OSError(_last_error_words())
+
+    limits = _JobExtendedLimitInformation()
+    limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(
+        handle,
+        _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+        ctypes.byref(limits),
+        ctypes.sizeof(limits),
+    ):
+        error = OSError(_last_error_words())
+        kernel32.CloseHandle(handle)
+        raise error
+    return ChildJob(kernel32, handle)
+
+
+class _ChildrenJobForRun:
+    """Places every recorder child in the one job object of this program run.
+
+    The job is created on the first spawn and kept for the rest of the run, so
+    its handle stays open. If Windows refuses it, or refuses one child, exactly
+    one debug line says so and every later child is left unprotected: the
+    recording goes on either way, and nothing here ever raises.
+    """
+
+    def __init__(self):
+        self._job = None
+        self._settled = False
+
+    def available(self) -> bool:
+        """Return True while the kill-on-close protection is in place.
+
+        Makes the one job object of the run if nothing has done so yet, exactly
+        as a first spawn would, and remembers the answer. Never raises.
+        """
+        self._make_once()
+        return self._job is not None
+
+    def place(self, child) -> None:
+        """Put *child* in the job, or note once why that is not possible."""
+        self._make_once()
+
+        if self._job is None:
+            return
+
+        try:
+            self._job.place(child)
+        except Exception as error:
+            self._job = None
+            self._gave_up(error)
+
+    def _make_once(self) -> None:
+        """Create the job object on the first call and never try again."""
+        if self._settled:
+            return
+        self._settled = True
+        try:
+            self._job = create_child_job()
+        except Exception as error:
+            self._gave_up(error)
+
+    @staticmethod
+    def _gave_up(reason) -> None:
+        """Write the one debug line that says the protection is off."""
+        logger.debug(
+            f"Could not create the job object ({reason}); "
+            f"recorder children may outlive this program."
+        )
+
+
+# One job object for this program run, shared by every Recorder made here.
+_children_job = _ChildrenJobForRun()
+
+
+def job_object_available() -> bool:
+    """Return True while recorder children are ended with this program.
+
+    The automator asks this before it force-kills the List Recorder: with the
+    protection in place that kill ends the helper's own recorders, and without
+    it they may still be running. The one job object of the run is made here if
+    no spawn has made it yet. This never raises and never starts anything.
+    """
+    return _children_job.available()
+
+
 class Recorder:
     """Owns one recorder child process and nothing else.
 
@@ -491,7 +687,7 @@ class Recorder:
             os.makedirs(self._settings.output_dir, exist_ok=True)
         except OSError as error:
             logger.error(
-                f"Could not create the Clips folder "
+                f"Could not create the folder "
                 f"'{self._settings.output_dir}': {error}"
             )
             return False
@@ -523,6 +719,9 @@ class Recorder:
             return False
 
         self._child = child
+        # Straight after the spawn: this child must end when this program
+        # ends, however it ends, including a hard kill.
+        _children_job.place(child)
         self._started_at = moment
         self._start_output_reader(child)
         logger.info(

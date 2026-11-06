@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import sys
 import time
 from typing import List, Optional
@@ -600,16 +601,39 @@ def read_list_entries(
     return entries
 
 
+def install_stop_signal() -> None:
+    """Make the console's stop signal run the same shutdown as Ctrl+C.
+
+    The automator, when it owns this program, asks it to stop by sending the
+    console's stop signal to its process group. Windows delivers that as
+    ``SIGBREAK``, so this handler raises ``KeyboardInterrupt`` exactly as Ctrl+C
+    does: the loop's one shutdown path closes every open Clip and the program
+    exits with code 0. A program started by hand is unaffected.
+    """
+    if not hasattr(signal, "SIGBREAK"):
+        return
+    try:
+        signal.signal(signal.SIGBREAK, _stop_like_ctrl_c)
+    except (ValueError, OSError) as error:
+        logger.debug(f"Could not install the stop signal handler: {error}")
+
+
+def _stop_like_ctrl_c(signum, frame) -> None:
+    """Turn the console's stop signal into the Ctrl+C path."""
+    raise KeyboardInterrupt
+
+
 def main() -> int:
     """Run the List Recorder until the user stops it.
 
     Returns the exit code: 1 when the recorder program is missing (nothing
-    could ever be recorded), 0 after Ctrl+C has closed every Clip. Every other
-    fault is logged and the loop carries on.
+    could ever be recorded), 0 after Ctrl+C or the automator's stop signal has
+    closed every Clip. Every other fault is logged and the loop carries on.
     """
     load_dotenv()
     settings = load_streams_settings()
     configure_logging(settings.log_level)
+    install_stop_signal()
     _log_startup(settings)
 
     if not ffmpeg_available(build_engine_settings(settings, "")):
