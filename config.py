@@ -143,14 +143,24 @@ def parse_text(value: str, default: str, setting_name: Optional[str] = None) -> 
     """
     text = value.strip()
     if not text:
-        if setting_name:
-            logger.warning(
-                f"Empty {setting_name} value. Using default '{default}'."
-            )
-        else:
-            logger.warning(f"Empty value. Using default '{default}'.")
+        label = f"{setting_name} value" if setting_name else "value"
+        logger.warning(f"Empty {label}. Using default '{default}'.")
         return default
     return text
+
+
+def parse_telegram_path(value: Optional[str], default: str) -> str:
+    """Return the Telegram program file named by the settings.
+
+    An absent value (``None``) is a line nobody wrote: the usual per-user
+    install is used silently. A line that is present but blank is an entry
+    someone cleared, so it warns once naming ``TELEGRAM_PATH`` and the default
+    it falls back to. The absence test happens here, before parsing, so an
+    absent line never earns that warning.
+    """
+    if value is None:
+        return default
+    return parse_text(value, default, "TELEGRAM_PATH")
 
 
 def parse_log_level(value: str, default: str = "INFO") -> str:
@@ -275,18 +285,10 @@ class Config:
     """Centralized configuration loaded from environment variables with parsing and defaults."""
 
     def __init__(self):
-        # An absent TELEGRAM_PATH is a choice nobody made: use the usual
-        # per-user install silently. The absence test must come before parsing,
-        # so an absent line never earns the empty-value warning.
-        telegram_path_setting = os.getenv("TELEGRAM_PATH")
-        if telegram_path_setting is None:
-            self.telegram_path = DEFAULT_TELEGRAM_PATH
-        else:
-            self.telegram_path = parse_text(
-                telegram_path_setting,
-                DEFAULT_TELEGRAM_PATH,
-                "TELEGRAM_PATH",
-            )
+        self.telegram_path = parse_telegram_path(
+            os.getenv("TELEGRAM_PATH"),
+            DEFAULT_TELEGRAM_PATH,
+        )
         self.second_window_title = os.getenv("SECOND_WINDOW_TITLE", "secondWindowTitle")
         self.screen_resolution = parse_resolution(
             os.getenv("SCREEN_RESOLUTION", "1920x1080"),

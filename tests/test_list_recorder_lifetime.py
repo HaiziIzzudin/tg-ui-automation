@@ -196,14 +196,39 @@ class TestStart:
             main.launch_list_recorder_process(
                 program_path=r"C:\App\record_streams.py",
                 interpreter=r"C:\Python\python.exe",
+                has_console=True,
             )
 
         flags = popen.call_args.kwargs["creationflags"]
         assert flags & main.subprocess.CREATE_NEW_PROCESS_GROUP
-        # A new console would hide it from the stop signal sent on the way out.
+        # Sharing the console is what lets the stop signal reach the helper.
         assert not flags & main.subprocess.CREATE_NO_WINDOW
         assert popen.call_args.kwargs["stdout"] is main.subprocess.DEVNULL
         assert popen.call_args.kwargs["stderr"] is main.subprocess.DEVNULL
+
+    def test_a_consoleless_launch_gets_no_window_at_all(self):
+        with patch("main.subprocess.Popen") as popen:
+            main.launch_list_recorder_process(
+                program_path=r"C:\App\record_streams.py",
+                interpreter=r"C:\Python\python.exe",
+                has_console=False,
+            )
+
+        flags = popen.call_args.kwargs["creationflags"]
+        assert flags & main.subprocess.CREATE_NEW_PROCESS_GROUP
+        assert flags & main.subprocess.CREATE_NO_WINDOW
+
+    def test_an_ask_reaches_a_helper_on_this_console(self, monkeypatch):
+        monkeypatch.setattr(main, "console_process_ids", lambda: {11, 22})
+        with patch("main.os.kill") as kill:
+            assert main.send_console_stop_signal(22) is True
+        kill.assert_called_once_with(22, main.signal.CTRL_BREAK_EVENT)
+
+    def test_an_ask_is_not_sent_to_a_helper_on_another_console(self, monkeypatch):
+        monkeypatch.setattr(main, "console_process_ids", lambda: {11, 22})
+        with patch("main.os.kill") as kill:
+            assert main.send_console_stop_signal(99) is False
+        kill.assert_not_called()
 
     def test_the_program_lives_next_to_the_automator(self):
         assert main.list_recorder_program_path() == str(
@@ -462,8 +487,12 @@ class TestStop:
                           MagicMock(return_value=False), create=True):
             assert main.job_object_protection_available() is False
 
-    def test_the_engine_without_the_check_means_no_protection(self):
-        with patch.object(main, "recorder", MagicMock(spec=[])):
+    def test_a_fault_in_the_check_means_no_protection(self):
+        with patch.object(
+            main.recorder,
+            "job_object_available",
+            MagicMock(side_effect=RuntimeError("refused")),
+        ):
             assert main.job_object_protection_available() is False
 
 

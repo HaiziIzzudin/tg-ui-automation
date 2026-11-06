@@ -10,7 +10,7 @@ The module never imports ``main``, ``config``, or ``schedule``, and it never
 reads the clock. Exactly one child process is owned here; its own words are
 read on a background thread, so nothing the recorder writes can block the
 automator. Before every start a Stream Check looks at the stream's playlist
-and picks the newest segment that really exists. The Clips folder alone is
+and picks the newest segment that really exists. The output folder alone is
 watched, once per monitor cycle, to name the Clip being written in the log.
 The automator's own recording uses the defaults: endless reconnection and the
 timestamp-only Clip name. Two optional values let a List Recorder reuse the
@@ -617,7 +617,8 @@ def job_object_available() -> bool:
     The automator asks this before it force-kills the List Recorder: with the
     protection in place that kill ends the helper's own recorders, and without
     it they may still be running. The one job object of the run is made here if
-    no spawn has made it yet. This never raises and never starts anything.
+    no spawn has made it yet; an empty job has no members, so asking before any
+    recording starts is harmless. This never raises and never starts anything.
     """
     return _children_job.available()
 
@@ -642,7 +643,7 @@ class Recorder:
         self._failed_attempts = 0
         self._gave_up = False
         # The Current Clip name already announced, and the file names that were
-        # in the Clips folder when this run started. The second set is what
+        # in the output folder when this run started. The second set is what
         # keeps leftovers from an earlier run out of the log.
         self._last_clip: Optional[str] = None
         self._clips_at_start = set()
@@ -978,7 +979,7 @@ class Recorder:
         Called from ``supervise``, i.e. once per monitor cycle while
         recording. Only a live child is considered, so a stopped or
         reconnecting recorder announces nothing. Any failure here is a debug
-        note: watching the Clips folder must never disturb recording.
+        note: watching the output folder must never disturb recording.
         """
         try:
             if not self.is_running():
@@ -998,10 +999,10 @@ class Recorder:
 
         Files that were already in the folder when the run started are
         skipped, so only a name appearing afterwards counts. When a Clip-name
-        prefix is set, only files led by it count: the Clips folder is shared
-        with the automator and with other List Recordings, and announcing
-        somebody else's file would name the wrong Clip. A folder that cannot be
-        listed is a debug note and gives None; it never raises.
+        prefix is set, only files led by it count: the folder may hold the
+        automator's own Clips or older flat list Clips, and announcing somebody
+        else's file would name the wrong Clip. A folder that cannot be listed
+        is a debug note and gives None; it never raises.
         """
         names = self._list_clip_names()
         if names is None:
@@ -1020,7 +1021,7 @@ class Recorder:
         return max(fresh)
 
     def _list_clip_names(self) -> Optional[List[str]]:
-        """Return the file names in the Clips folder, or None when unlistable.
+        """Return the file names in the output folder, or None when unlistable.
 
         A missing folder, a folder that is really a file, or a denied read is
         a quiet debug note: the recorder keeps running either way.
@@ -1029,7 +1030,7 @@ class Recorder:
             return os.listdir(self._settings.output_dir)
         except OSError as error:
             logger.debug(
-                f"Could not read the Clips folder "
+                f"Could not read the output folder "
                 f"'{self._settings.output_dir}': {error}"
             )
             return None

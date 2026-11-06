@@ -1073,22 +1073,45 @@ def find_list_recorder_process():
     return None
 
 
-def launch_list_recorder_process(program_path=None, interpreter=None):
-    """Start the helper: same interpreter, its own process group, no console.
+def console_process_ids():
+    """Return the process ids attached to this console, or None when unknown.
+
+    The console stop signal only reaches processes on the automator's own
+    console: a copy started by hand in another console cannot answer it. This
+    is the one cheap question that tells the two apart, so the ask is never
+    reported as delivered when it cannot arrive.
+    """
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ids = (ctypes.c_uint32 * 256)()
+        count = kernel32.GetConsoleProcessList(ids, 256)
+    except Exception as error:
+        logger.debug(f"Could not read this console's processes: {error}")
+        return None
+    if not count:
+        return None
+    return set(ids[:count])
+
+
+def launch_list_recorder_process(program_path=None, interpreter=None, has_console=None):
+    """Start the helper: same interpreter, its own process group, no window.
 
     Its standard output and error are discarded, so its chatter never reaches
-    the automator's console or log; its own log file is its record.
+    the automator's console or log; its own log file is its record. When the
+    automator has a console the helper shares it — a new process group keeps
+    the user's Ctrl+C to the automator alone, and the stop signal the automator
+    sends on the way out can reach the helper. Only when there is no console to
+    share does the helper get the "no window" flag, so it never opens one.
     """
     command = [
         interpreter or sys.executable,
         program_path or list_recorder_program_path(),
     ]
+    if has_console is None:
+        has_console = console_process_ids() is not None
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    # No CREATE_NO_WINDOW here on purpose: that flag gives the helper a console
-    # of its own, and the console stop signal the automator sends on the way
-    # out can then never reach it. A new process group keeps the user's Ctrl+C
-    # to the automator alone, and the helper's own output is discarded below,
-    # so it stays invisible without a second window.
+    if not has_console:
+        flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return subprocess.Popen(
         command,
         creationflags=flags,
@@ -1102,11 +1125,19 @@ def send_console_stop_signal(pid) -> bool:
     """Ask the helper's process group to stop, the way Ctrl+C would ask it.
 
     The helper handles that signal by running its ordinary shutdown, which
-    closes every open Clip and exits with code 0. Returns False when the signal
-    cannot be delivered; the caller then terminates and kills instead.
+    closes every open Clip and exits with code 0. Only a helper on this console
+    can hear it; a copy started by hand in another console cannot, and reports
+    False so the caller goes straight to terminate and kill, as the spec says.
     """
     stop_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
     if stop_signal is None or pid is None:
+        return False
+    members = console_process_ids()
+    if members is not None and pid not in members:
+        logger.debug(
+            "The List Recorder is not on this console; the stop signal cannot "
+            "reach it."
+        )
         return False
     try:
         os.kill(pid, stop_signal)
@@ -1119,16 +1150,15 @@ def send_console_stop_signal(pid) -> bool:
 def job_object_protection_available() -> bool:
     """Return True when the engine ends recorder children with their program.
 
-    The engine gained that protection after this program did, so the check is
-    optional: an engine without it means the unsure line after a forced kill.
+    The helper runs the same engine on this same machine, so the automator's
+    own answer stands in for the helper's: where Windows refuses the job
+    object, the forced kill has to say that recorders may still be running.
     """
-    checker = getattr(recorder, "job_object_available", None)
-    if checker is None:
-        return False
     try:
-        return bool(checker())
+        return bool(recorder.job_object_available())
     except Exception:
         return False
+
 
 
 class ListRecorderSupervisor:
