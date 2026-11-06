@@ -8,6 +8,7 @@ Ctrl+C path can be checked without running the loop for real.
 """
 import datetime
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -1127,6 +1128,31 @@ class TestProgramEntry:
 
         assert calls["stop_alls"] == 1
         assert calls["cycles"] == [[listed("Jevv")]]
+        assert any(
+            "stopped the List Recorder" in text for text in messages(caplog)
+        )
+
+    def test_the_stop_signal_takes_the_same_way_out_as_ctrl_c(
+        self, monkeypatch, caplog
+    ):
+        """The automator's ask is the console's stop signal, not a kill."""
+        caplog.set_level(logging.INFO)
+        calls, _clock = run_program(monkeypatch, make_settings(), [GOOD_REPLY])
+
+        def stop_as_the_automator_asks(address, timeout):
+            signal.raise_signal(signal.SIGBREAK)
+            return GOOD_REPLY
+
+        previous = signal.getsignal(signal.SIGBREAK)
+        try:
+            monkeypatch.setattr(
+                record_streams, "fetch_stream_list_text", stop_as_the_automator_asks
+            )
+            assert record_streams.main() == 0
+        finally:
+            signal.signal(signal.SIGBREAK, previous)
+
+        assert calls["stop_alls"] == 1
         assert any(
             "stopped the List Recorder" in text for text in messages(caplog)
         )
