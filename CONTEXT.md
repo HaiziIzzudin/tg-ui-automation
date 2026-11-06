@@ -77,7 +77,7 @@ Capturing the live stream straight from the network and writing it to disk, done
 _Avoid_: Taping, capture session
 
 **Clip**:
-One recorded file covering a stretch of stream. A Clip is closed properly so it plays on its own, and is named by the moment it started. A Clip belonging to a List Recording also begins with the person's Clean Name and uses a two-digit year.
+One recorded file covering a stretch of stream. A Clip is closed properly so it plays on its own, and is named by the moment it started. A Clip belonging to a List Recording also begins with the person's Clean Name and uses a two-digit year, and sits in that person's own folder.
 _Avoid_: Segment, chunk, part, video file
 
 **Recording Mode**:
@@ -153,8 +153,12 @@ The recording of one Listed Person's stream. Held by one recorder child of its o
 _Avoid_: Multi recording, batch capture, session
 
 **Clean Name**:
-A Listed Person's display name after the characters Windows refuses are replaced and spaces become underscores. It leads the person's Clip names and is unique within one run.
+A Listed Person's display name after the characters Windows refuses are replaced and spaces become underscores. It names that person's folder and leads their Clip names, and it is unique within one run.
 _Avoid_: Sanitized name, safe name, slug
+
+**Person Folder**:
+The folder holding one Listed Person's Clips, directly inside the Clips folder and named by exactly that person's Clean Name, so folder and Clip name always agree. Made at that person's first start attempt and never moved or deleted; the automator's own Clips keep writing at the top level beside it.
+_Avoid_: Subfolder, per-person folder, person directory
 
 **Absence Grace**:
 The tolerance for a Listed Person missing from the Stream List: two replies in a row is what stops their recording, because one missing reply is not proof that they left.
@@ -169,6 +173,10 @@ A Listed Person whose recording stopped after the Retry Limit and is no longer r
 _Avoid_: Failed, dead, errored
 
 **List Recorder**:
-The separate program that keeps one List Recording per Listed Person. It reads no Schedule and no Recording Mode; the only setting it shares with the automator is the Clips folder.
+The separate program that keeps one List Recording per Listed Person. It reads no Schedule and no Recording Mode; the only setting it shares with the automator is the Clips folder. While the List Recorder Switch is on, the automator starts it, keeps it alive, and stops it when its own run ends; with the switch off a person starts it by hand, exactly as before.
 _Avoid_: Multi recorder, stream farm, bulk recorder
+
+**List Recorder Switch**:
+The one setting that allows the automator to run the List Recorder. On, the automator starts it, adopts a copy already running, and restarts it when it dies; off, the automator never looks for, adopts, starts, or stops one.
+_Avoid_: List mode, list recording switch, streams toggle
 
