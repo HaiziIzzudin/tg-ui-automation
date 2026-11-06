@@ -191,7 +191,7 @@ class TestStart:
         command = popen.call_args.args[0]
         assert command == [r"C:\Python\python.exe", r"C:\App\record_streams.py"]
 
-    def test_the_launch_has_its_own_group_no_window_and_no_output(self):
+    def test_the_launch_has_its_own_group_and_no_output(self):
         with patch("main.subprocess.Popen") as popen:
             main.launch_list_recorder_process(
                 program_path=r"C:\App\record_streams.py",
@@ -200,7 +200,8 @@ class TestStart:
 
         flags = popen.call_args.kwargs["creationflags"]
         assert flags & main.subprocess.CREATE_NEW_PROCESS_GROUP
-        assert flags & main.subprocess.CREATE_NO_WINDOW
+        # A new console would hide it from the stop signal sent on the way out.
+        assert not flags & main.subprocess.CREATE_NO_WINDOW
         assert popen.call_args.kwargs["stdout"] is main.subprocess.DEVNULL
         assert popen.call_args.kwargs["stderr"] is main.subprocess.DEVNULL
 

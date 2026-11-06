@@ -1157,6 +1157,28 @@ class TestProgramEntry:
             "stopped the List Recorder" in text for text in messages(caplog)
         )
 
+    def test_the_console_stop_event_takes_the_ctrl_c_way(self, monkeypatch):
+        """A break event asks the main thread for the Ctrl+C it already knows."""
+        handlers = []
+        raised = []
+
+        class FakeKernel32:
+            def SetConsoleCtrlHandler(self, handler, add):
+                handlers.append((handler, add))
+                return 1
+
+        monkeypatch.setattr(
+            record_streams.signal, "raise_signal", lambda signum: raised.append(signum)
+        )
+        record_streams._register_console_stop_handler(FakeKernel32())
+
+        assert handlers[-1][1] is True
+        callback = handlers[-1][0]
+        assert callback(record_streams._CTRL_BREAK_EVENT) == 1
+        assert raised == [signal.SIGINT]
+        assert callback(5) == 0
+        assert raised == [signal.SIGINT]
+
     def test_one_request_is_fetched_with_the_poll_timeout(self, monkeypatch):
         settings = make_settings(poll_seconds=5.0)
         calls, _clock = run_program(monkeypatch, settings, [GOOD_REPLY])

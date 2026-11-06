@@ -20,6 +20,7 @@ case is a missing recorder program at startup, which ``main`` checks once.
 Ctrl+C closes every open Clip so it stays playable, then the program exits.
 """
 
+import ctypes
 import datetime
 import json
 import logging
@@ -605,17 +606,68 @@ def install_stop_signal() -> None:
     """Make the console's stop signal run the same shutdown as Ctrl+C.
 
     The automator, when it owns this program, asks it to stop by sending the
-    console's stop signal to its process group. Windows delivers that as
-    ``SIGBREAK``, so this handler raises ``KeyboardInterrupt`` exactly as Ctrl+C
-    does: the loop's one shutdown path closes every open Clip and the program
-    exits with code 0. A program started by hand is unaffected.
+    console's stop signal to its process group. Two handlers are installed so
+    that ask always lands on the ordinary Ctrl+C path, whose one shutdown
+    closes every open Clip and exits with code 0:
+
+    * the console control handler below, because Windows delivers that signal
+      as a console event rather than a Python signal, and
+    * ``SIGBREAK``, for a real Ctrl+Break typed into a console.
+
+    A program started by hand is unaffected.
     """
+    _install_console_stop_handler()
+
     if not hasattr(signal, "SIGBREAK"):
         return
     try:
         signal.signal(signal.SIGBREAK, _stop_like_ctrl_c)
     except (ValueError, OSError) as error:
         logger.debug(f"Could not install the stop signal handler: {error}")
+
+
+# Windows console control events. A break event is the one the automator sends.
+_CTRL_C_EVENT = 0
+_CTRL_BREAK_EVENT = 1
+
+# The registered console handler; Windows calls it on another thread, so it
+# must be kept alive for the whole run.
+_console_handler = None
+
+
+def _install_console_stop_handler() -> None:
+    """Register the handler that turns the console stop event into Ctrl+C.
+
+    The callback runs on a thread Windows owns, where raising would go
+    nowhere; it asks the main thread for ``SIGINT`` instead, which is exactly
+    how a real Ctrl+C arrives. Any failure is a debug note: the program keeps
+    recording, and a stop the signal cannot end is still terminated by the
+    automator.
+    """
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception as error:
+        logger.debug(f"Could not reach the console control interface: {error}")
+        return
+    _register_console_stop_handler(kernel32)
+
+
+def _register_console_stop_handler(kernel32) -> None:
+    """Register the callback with *kernel32*; kept separate so it can be tested."""
+    global _console_handler
+    try:
+        handler_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+
+        def _handle(event):
+            if event in (_CTRL_C_EVENT, _CTRL_BREAK_EVENT):
+                signal.raise_signal(signal.SIGINT)
+                return True
+            return False
+
+        _console_handler = handler_type(_handle)
+        kernel32.SetConsoleCtrlHandler(_console_handler, True)
+    except Exception as error:
+        logger.debug(f"Could not install the console stop handler: {error}")
 
 
 def _stop_like_ctrl_c(signum, frame) -> None:

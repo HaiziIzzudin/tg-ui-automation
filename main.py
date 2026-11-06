@@ -1084,7 +1084,11 @@ def launch_list_recorder_process(program_path=None, interpreter=None):
         program_path or list_recorder_program_path(),
     ]
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # No CREATE_NO_WINDOW here on purpose: that flag gives the helper a console
+    # of its own, and the console stop signal the automator sends on the way
+    # out can then never reach it. A new process group keeps the user's Ctrl+C
+    # to the automator alone, and the helper's own output is discarded below,
+    # so it stays invisible without a second window.
     return subprocess.Popen(
         command,
         creationflags=flags,
