@@ -24,6 +24,7 @@ from config import (
     Config,
     DEFAULT_OBS_PATH,
     DEFAULT_RECORDINGS_DIR,
+    DEFAULT_TELEGRAM_PATH,
     clamp_rotation,
 )
 
@@ -360,6 +361,22 @@ class TestParseText:
         assert parse_text("", "fallback") == "fallback"
         assert parse_text("   ", "fallback") == "fallback"
 
+    def test_without_a_setting_name_the_wording_is_unchanged(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert parse_text("  ", "fallback") == "fallback"
+
+        messages = [r.getMessage() for r in caplog.records
+                    if "Empty" in r.getMessage()]
+        assert messages == ["Empty value. Using default 'fallback'."]
+
+    def test_a_setting_name_is_named_with_the_default(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert parse_text("  ", "fallback", "TELEGRAM_PATH") == "fallback"
+
+        warnings = [r for r in caplog.records if "TELEGRAM_PATH" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "fallback" in warnings[0].getMessage()
+
 
 class TestParseLogLevel:
     """LOG_LEVEL accepts four names, case-insensitively, and warns otherwise."""
@@ -493,6 +510,102 @@ class TestParseBool:
         with caplog.at_level("WARNING"):
             assert parse_bool(None, True) is True
         assert any("switch value" in r.getMessage().lower() for r in caplog.records)
+
+    def test_without_a_setting_name_the_wording_is_unchanged(self, caplog):
+        """The Broadcast Switch passes no name, so its line must stay as it is."""
+        with caplog.at_level("WARNING"):
+            assert parse_bool("sometimes", False) is False
+
+        messages = [r.getMessage() for r in caplog.records
+                    if "switch value" in r.getMessage().lower()]
+        assert messages == [
+            "Invalid switch value 'sometimes': accepted values are "
+            "'true', '1', 'yes', 'on', 'false', '0', 'no', 'off'. "
+            "Using default False."
+        ]
+
+    def test_a_setting_name_is_named_in_the_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert parse_bool("", False, "RECORD_LIST_ENABLED") is False
+
+        warnings = [r for r in caplog.records if "RECORD_LIST_ENABLED" in r.getMessage()]
+        assert len(warnings) == 1
+
+
+class TestTelegramPath:
+    """TELEGRAM_PATH names the Telegram program file; absent means the usual install."""
+
+    def test_the_default_is_the_usual_per_user_install(self):
+        expected = os.path.join(
+            os.path.expanduser("~"),
+            "AppData",
+            "Roaming",
+            "Telegram Desktop",
+            "Telegram.exe",
+        )
+        assert DEFAULT_TELEGRAM_PATH == expected
+
+    def test_an_absent_line_uses_the_default_without_a_warning(self, monkeypatch, caplog):
+        monkeypatch.delenv("TELEGRAM_PATH", raising=False)
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.telegram_path == DEFAULT_TELEGRAM_PATH
+        assert not [r for r in caplog.records if "TELEGRAM_PATH" in r.getMessage()]
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_line_warns_once_and_uses_the_default(self, monkeypatch, caplog, blank):
+        monkeypatch.setenv("TELEGRAM_PATH", blank)
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.telegram_path == DEFAULT_TELEGRAM_PATH
+        warnings = [r for r in caplog.records if "TELEGRAM_PATH" in r.getMessage()]
+        assert len(warnings) == 1
+        assert DEFAULT_TELEGRAM_PATH in warnings[0].getMessage()
+
+    def test_a_value_is_trimmed_and_kept(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_PATH", r"  D:\Apps\Telegram.exe  ")
+        assert Config().telegram_path == r"D:\Apps\Telegram.exe"
+
+
+class TestRecordListSwitch:
+    """RECORD_LIST_ENABLED turns the List Recorder on and off; off by default."""
+
+    def test_default_is_off_with_no_warning(self, monkeypatch, caplog):
+        monkeypatch.delenv("RECORD_LIST_ENABLED", raising=False)
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.record_list_enabled is False
+        assert not [r for r in caplog.records if "RECORD_LIST_ENABLED" in r.getMessage()]
+
+    @pytest.mark.parametrize("word", ["true", "1", "yes", "on", "  ON  "])
+    def test_the_on_words_turn_it_on(self, monkeypatch, word):
+        monkeypatch.setenv("RECORD_LIST_ENABLED", word)
+        assert Config().record_list_enabled is True
+
+    @pytest.mark.parametrize("word", ["false", "0", "no", "off", "  Off  "])
+    def test_the_off_words_turn_it_off(self, monkeypatch, word):
+        monkeypatch.setenv("RECORD_LIST_ENABLED", word)
+        assert Config().record_list_enabled is False
+
+    @pytest.mark.parametrize("bad", ["", "   ", "sometimes", "2"])
+    def test_a_blank_or_unknown_value_warns_once_then_off(self, monkeypatch, caplog, bad):
+        monkeypatch.setenv("RECORD_LIST_ENABLED", bad)
+
+        with caplog.at_level("WARNING"):
+            config = Config()
+
+        assert config.record_list_enabled is False
+        warnings = [r for r in caplog.records if "RECORD_LIST_ENABLED" in r.getMessage()]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        for accepted in ("true", "false", "1", "0", "yes", "no", "on", "off"):
+            assert accepted in message
 
 
 class TestParsePort:

@@ -72,13 +72,20 @@ def build_engine_settings(
 
     *person_name* is that person's Clean Name; it leads every Clip name as
     ``<Clean Name>_``, so the engine writes
-    ``<Clean Name>_YYMMDD_HHMMSS.mp4``. An empty name keeps the plain timestamp
-    name, which is what the startup check needs and nothing else.
+    ``<Clean Name>_YYMMDD_HHMMSS.mp4`` inside a folder of its own,
+    ``<Clips folder>\\<Clean Name>\\``. An empty name keeps the plain timestamp
+    name in the shared Clips folder, which is what the startup check needs and
+    nothing else.
     """
     prefix = person_name + "_" if person_name else ""
+    output_dir = (
+        os.path.join(settings.output_dir, person_name)
+        if person_name
+        else settings.output_dir
+    )
     return RecorderSettings(
         stream_url=stream_url,
-        output_dir=settings.output_dir,
+        output_dir=output_dir,
         clip_seconds=settings.clip_seconds,
         reconnect_seconds=settings.reconnect_seconds,
         ffmpeg_path=settings.ffmpeg_path,
@@ -638,7 +645,10 @@ def main() -> int:
 def _log_startup(settings: StreamsSettings) -> None:
     """Log the values the user needs to confirm the program is set up right."""
     logger.info(f"Stream List address: {settings.list_url}")
-    logger.info(f"Clips folder: {settings.output_dir}")
+    logger.info(
+        f"Clips folder: {settings.output_dir} (each Listed Person records into a "
+        f"folder of their own inside it)"
+    )
     logger.info(
         f"Poll interval: {settings.poll_seconds:g} seconds; Clip length: "
         f"{settings.clip_seconds} seconds; Retry Limit: {settings.retry_limit}."
