@@ -42,6 +42,10 @@ from recorder import (
     is_useful_child_line,
 )
 
+# The real job-object creator, kept before any test replaces it, so the
+# non-Windows path can be exercised on this machine.
+REAL_CREATE_CHILD_JOB = recorder.create_child_job
+
 
 @pytest.fixture(autouse=True)
 def fake_stream_check(monkeypatch):
@@ -53,6 +57,20 @@ def fake_stream_check(monkeypatch):
     fake = MagicMock(return_value=LIVE_START_INDEX)
     monkeypatch.setattr(recorder, "choose_live_start_index", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def fake_job_object(monkeypatch):
+    """Never touch a real Windows job object: every test gets a fresh one.
+
+    The job object is created once per program run, so this also resets that
+    "once" for each test. A test that needs the absence path replaces the
+    creator itself.
+    """
+    job = FakeJob()
+    monkeypatch.setattr(recorder, "create_child_job", lambda: job)
+    monkeypatch.setattr(recorder, "_children_job", recorder._ChildrenJobForRun())
+    return job
 
 
 # 2024-01-01 is a Monday; moments are offsets from it, on the local clock.
@@ -205,6 +223,23 @@ def install_failing_spawner(monkeypatch, *children) -> FailingSpawner:
     spawner = FailingSpawner(*children)
     monkeypatch.setattr(recorder.subprocess, "Popen", spawner)
     return spawner
+
+
+class FakeJob:
+    """A stand-in for the Windows job object, recording who was placed in it.
+
+    ``fail_on_place`` makes Windows refuse the child, which is the other way
+    the protection can be absent.
+    """
+
+    def __init__(self, fail_on_place=False):
+        self.placed = []
+        self.fail_on_place = fail_on_place
+
+    def place(self, child):
+        if self.fail_on_place:
+            raise OSError("access denied")
+        self.placed.append(child)
 
 
 # ==============================================================================
@@ -695,6 +730,29 @@ class TestStart:
 
         assert rec.start(at()) is False
         assert rec.status() == "stopped"
+
+    def test_a_refused_folder_error_names_the_folder_it_was_asked_to_make(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # The engine may now be asked for one Listed Person's folder rather
+        # than the shared Clips folder, so the one error names the folder it
+        # actually asked for. Same single error, same failed start.
+        def exploding_makedirs(path, exist_ok=False):
+            raise OSError("denied")
+
+        monkeypatch.setattr(recorder.os, "makedirs", exploding_makedirs)
+        folder = tmp_path / "Alif_Naim"
+        rec = Recorder(make_settings(folder))
+
+        caplog.set_level(logging.ERROR)
+        assert rec.start(at()) is False
+
+        errors = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.ERROR
+        ]
+        assert errors == [f"Could not create the folder '{folder}': denied"]
 
     def test_start_while_running_spawns_nothing_more(self, tmp_path, monkeypatch):
         spawner = install_spawner(monkeypatch, FakeChild())
@@ -1483,6 +1541,218 @@ class TestChildOutput:
         rec = Recorder(make_settings(tmp_path))
         rec.start(at())
         assert rec._reader is None
+
+
+# ==============================================================================
+# The job object: recorder children end with the program that owns them
+# ==============================================================================
+
+class TestJobObject:
+    """A dead program ends its recorder children; a refused job never hurts."""
+
+    def test_a_refused_job_is_one_debug_line_and_recording_carries_on(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        def refused():
+            raise OSError("access denied")
+
+        monkeypatch.setattr(recorder, "create_child_job", refused)
+        install_spawner(monkeypatch, FakeChild(), FakeChild())
+        rec = Recorder(make_settings(tmp_path))
+
+        caplog.set_level(logging.DEBUG)
+        assert rec.start(at(0)) is True
+        assert rec.is_running() is True
+
+        # A later spawn is not refused either, and the line is not repeated.
+        rec.stop()
+        assert rec.start(at(60)) is True
+        assert rec.is_running() is True
+
+        lines = [
+            record
+            for record in caplog.records
+            if "job object" in record.getMessage()
+        ]
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.DEBUG
+        assert lines[0].getMessage() == (
+            "Could not create the job object (access denied); "
+            "recorder children may outlive this program."
+        )
+
+    def test_every_spawned_child_is_placed_in_the_job(
+        self, tmp_path, monkeypatch, fake_job_object
+    ):
+        first, second = FakeChild(), FakeChild()
+        install_spawner(monkeypatch, first, second)
+        rec = Recorder(make_settings(tmp_path, reconnect_seconds=0.0))
+
+        rec.start(at(0))
+        assert fake_job_object.placed == [first]
+
+        # A reconnection spawns another child, which is protected too.
+        first.die()
+        rec.supervise(at(1))
+        rec.supervise(at(1))
+        assert fake_job_object.placed == [first, second]
+
+    def test_the_job_is_made_once_for_the_whole_program_run(
+        self, tmp_path, monkeypatch
+    ):
+        # The automator and the List Recorder each make one Recorder per
+        # stream; all of them must share the one job of the program run, or a
+        # per-recorder handle would be closed and take its child with it.
+        made = []
+        job = FakeJob()
+
+        def counting_creator():
+            made.append(True)
+            return job
+
+        monkeypatch.setattr(recorder, "create_child_job", counting_creator)
+        one, two, three = FakeChild(), FakeChild(), FakeChild()
+        install_spawner(monkeypatch, one, two, three)
+
+        first = Recorder(make_settings(tmp_path / "one"))
+        second = Recorder(make_settings(tmp_path / "two"))
+        first.start(at(0))
+        second.start(at(0))
+        first.stop()
+        first.start(at(60))
+
+        assert len(made) == 1
+        assert job.placed == [one, two, three]
+
+    def test_windows_refusing_the_child_is_one_debug_line_too(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(
+            recorder, "create_child_job", lambda: FakeJob(fail_on_place=True)
+        )
+        rec = Recorder(make_settings(tmp_path))
+        install_spawner(monkeypatch, FakeChild(), FakeChild())
+
+        caplog.set_level(logging.DEBUG)
+        assert rec.start(at(0)) is True
+        assert rec.is_running() is True
+
+        rec.stop()
+        assert rec.start(at(60)) is True
+
+        lines = [
+            record
+            for record in caplog.records
+            if "job object" in record.getMessage()
+        ]
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.DEBUG
+        assert lines[0].getMessage() == (
+            "Could not create the job object (access denied); "
+            "recorder children may outlive this program."
+        )
+
+    def test_other_systems_have_no_job_object_and_nothing_to_say(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # The real creator is used here; only the platform answer is faked, so
+        # the non-Windows path is exercised without a real job object.
+        monkeypatch.setattr(recorder, "create_child_job", REAL_CREATE_CHILD_JOB)
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", False)
+        install_spawner(monkeypatch, FakeChild())
+        rec = Recorder(make_settings(tmp_path))
+
+        caplog.set_level(logging.DEBUG)
+        assert rec.start(at(0)) is True
+        assert rec.is_running() is True
+        assert not [
+            record
+            for record in caplog.records
+            if "job object" in record.getMessage()
+        ]
+
+
+class TestJobObjectAvailable:
+    """The automator asks this before it force-kills the List Recorder."""
+
+    def test_true_when_the_protection_is_in_place(self, tmp_path, monkeypatch):
+        made = []
+        job = FakeJob()
+
+        def counting_creator():
+            made.append(True)
+            return job
+
+        monkeypatch.setattr(recorder, "create_child_job", counting_creator)
+        child = FakeChild()
+        install_spawner(monkeypatch, child)
+
+        assert recorder.job_object_available() is True
+        assert len(made) == 1
+
+        # A later ask, and a spawn, reuse the same one job of the run.
+        Recorder(make_settings(tmp_path)).start(at(0))
+        assert recorder.job_object_available() is True
+        assert len(made) == 1
+        assert job.placed == [child]
+
+    def test_true_once_a_spawn_has_made_the_job(self, tmp_path, monkeypatch):
+        install_spawner(monkeypatch, FakeChild())
+        Recorder(make_settings(tmp_path)).start(at(0))
+
+        assert recorder.job_object_available() is True
+
+    def test_false_when_windows_refuses_and_one_debug_line_only(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        def refused():
+            raise OSError("access denied")
+
+        monkeypatch.setattr(recorder, "create_child_job", refused)
+        install_spawner(monkeypatch, FakeChild())
+        rec = Recorder(make_settings(tmp_path))
+
+        caplog.set_level(logging.DEBUG)
+        assert recorder.job_object_available() is False
+        assert recorder.job_object_available() is False
+
+        # Recording is not refused, and the one line is the job-object line
+        # already used by the first spawn.
+        assert rec.start(at(0)) is True
+        assert recorder.job_object_available() is False
+
+        lines = [
+            record
+            for record in caplog.records
+            if "job object" in record.getMessage()
+        ]
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.DEBUG
+        assert lines[0].getMessage() == (
+            "Could not create the job object (access denied); "
+            "recorder children may outlive this program."
+        )
+
+    def test_false_after_windows_refused_a_child(self, tmp_path, monkeypatch):
+        # Protection that could not take the child is no protection.
+        monkeypatch.setattr(
+            recorder, "create_child_job", lambda: FakeJob(fail_on_place=True)
+        )
+        install_spawner(monkeypatch, FakeChild())
+        Recorder(make_settings(tmp_path)).start(at(0))
+
+        assert recorder.job_object_available() is False
+
+    def test_never_raises_and_starts_nothing(self, monkeypatch, caplog):
+        def exploding():
+            raise RuntimeError("the whole world is broken")
+
+        monkeypatch.setattr(recorder, "create_child_job", exploding)
+        spawner = install_spawner(monkeypatch)
+
+        caplog.set_level(logging.DEBUG)
+        assert recorder.job_object_available() is False
+        assert spawner.calls == []
 
 
 class TestModuleBoundaries:
